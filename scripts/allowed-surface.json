@@ -1,0 +1,35 @@
+{
+  "hooks": [
+    "command.run{command=pauzza}",
+    "session.measure",
+    "session.start",
+    "ui.close",
+    "ui.render{component=AbovePrompt}",
+    "ui.render{component=Pane, requestId=pauzza-offers}"
+  ],
+  "calls": [
+    "$.clock.after",
+    "$.clock.every",
+    "$.clock.now",
+    "$.command.register",
+    "$.fs.read",
+    "$.http.fetch",
+    "$.session.usage",
+    "$.store.delete",
+    "$.store.get",
+    "$.store.set",
+    "$.ui.copy",
+    "$.ui.invalidate",
+    "$.ui.open",
+    "$.ui.resolve",
+    "$.ui.status",
+    "$.ui.toast"
+  ],
+  "addresses": {
+    "https://pwchzyltlirhiiaxoifb.supabase.co/functions/v1/": ["server.ts"],
+    "https://github.com/pauzza-app/pauzza-addon": ["consent-text.ts"],
+    "http://www.w3.org/2000/svg": ["art.ts", "loadings.ts"],
+    "https://${host}/": ["catalogue.ts"],
+    "https://${host}": ["catalogue.ts"]
+  }
+}

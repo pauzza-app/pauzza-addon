@@ -1,0 +1,8 @@
+# Everything needs the owner's review. Branch protection must require it.
+* @Pumba-Pumba
+/hooks/ @Pumba-Pumba
+/.claude-plugin/ @Pumba-Pumba
+/.github/ @Pumba-Pumba
+/scripts/ @Pumba-Pumba
+/release.json @Pumba-Pumba
+/offers.json @Pumba-Pumba

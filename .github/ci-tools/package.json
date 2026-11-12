@@ -1,0 +1,8 @@
+{
+  "name": "pauzza-ci-tools",
+  "private": true,
+  "description": "Pinned tools for the CI workflow only. The add-on has no dependencies.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.319"
+  }
+}

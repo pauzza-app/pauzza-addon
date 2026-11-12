@@ -1,0 +1,13 @@
+title = "Pauzza public repository"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "local-user-path"
+description = "A path from someone's own computer"
+regex = '''(?i)(?:\b[a-z]:\\(?:users|claude projects)\\|/home/[a-z0-9_-]+/|/Users/[A-Za-z0-9_-]+/)'''
+
+[allowlist]
+description = "Embedded pictures are base64 PNG data; they are checked separately by scripts/check-public.mjs"
+paths = ['''^art\.json$''', '''(^|/)package-lock\.json$''', '''^scripts/check-public\.mjs$''']

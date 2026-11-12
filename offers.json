@@ -1,0 +1,36 @@
+{
+  "categories": [
+    { "id": "food", "label": "Food" },
+    { "id": "drinks", "label": "Drinks" },
+    { "id": "tickets", "label": "Tickets" },
+    { "id": "gadgets", "label": "Gadgets" }
+  ],
+  "offers": [
+    { "id": "test-pizza", "brand": "Test Pizza", "text": "15% off a test pizza", "code": "TEST-0001", "category": "food", "addedAt": "2026-11-01", "sponsored": false, "score": 40 },
+    { "id": "test-khachapuri", "brand": "Test Khachapuri", "text": "Free test delivery", "code": "TEST-0002", "category": "food", "addedAt": "2026-11-03", "sponsored": true, "score": 20 },
+    { "id": "test-tickets", "brand": "Test Tickets", "text": "20% off test tickets", "code": "TEST-0003", "category": "tickets", "addedAt": "2026-11-07", "sponsored": true, "score": 50 },
+    { "id": "test-juice-bar", "brand": "Test Juice Bar", "text": "A free test juice", "code": "TEST-0004", "category": "drinks", "addedAt": "2026-11-05", "sponsored": false, "score": 30 },
+    { "id": "test-coffee", "brand": "Test Coffee", "text": "10% off a test coffee", "code": "TEST-0005", "category": "drinks", "addedAt": "2026-11-06", "sponsored": false, "score": 25 },
+    { "id": "test-gadgets", "brand": "Test Gadgets", "text": "10% off test headphones", "code": "TEST-0006", "category": "gadgets", "addedAt": "2026-11-02", "sponsored": true, "score": 10 }
+  ],
+  "rewards": [
+    { "id": "minutes-15", "minutes": 15, "brand": "Test Coffee", "text": "A free test coffee", "code": "TEST-R015" },
+    { "id": "minutes-30", "minutes": 30, "brand": "Test Pizza", "text": "25% off a test pizza", "code": "TEST-R030" },
+    { "id": "minutes-60", "minutes": 60, "brand": "Test Tickets", "text": "40% off a test ticket", "code": "TEST-R060" }
+  ],
+  "milestones": [
+    { "id": "first-present", "minutes": 0.25, "brand": "Test Coffee", "text": "20% off a test coffee", "code": "TEST-T001" }
+  ],
+  "dailyPresent": true,
+  "defaultMeters": ["line42", "pipeline", "install", "rain", "hexdump"],
+  "burnFive": { "id": "burn-five", "brand": "Test Coffee", "text": "30% off a test coffee", "code": "TEST-B005" },
+  "burnWeek": { "id": "burn-week", "brand": "Test Tickets", "text": "60% off a test ticket", "code": "TEST-B007" },
+  "welcomeReward": { "id": "welcome", "brand": "Test Coffee", "text": "A test welcome coffee", "code": "TEST-W001" },
+  "goodPaceReward": { "id": "good-pace", "brand": "Test Pizza", "text": "10% off a test pizza", "code": "TEST-P001" },
+  "finishReward": { "id": "finish", "brand": "Test Khachapuri", "text": "5% off a test khachapuri", "code": "TEST-F001" },
+  "drops": [
+    { "id": "drop-a", "brand": "Test Tickets", "text": "A test ticket at half price", "code": "TEST-D001", "quantity": 50 },
+    { "id": "drop-b", "brand": "Test Pizza", "text": "A second test pizza, free", "code": "TEST-D002", "quantity": 30 },
+    { "id": "drop-c", "brand": "Test Gadgets", "text": "30% off a test charger", "code": "TEST-D003", "quantity": 20 }
+  ]
+}
