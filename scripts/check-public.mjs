@@ -30,7 +30,7 @@ const FORBIDDEN_CODE = /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|child_pr
 const ALLOWED_FILES = new Set(['offers.json', 'release.json', 'TERMS.md', 'PRIVACY.md'])
 // The only functions in hooks/ that may be handed the engine object.
 const KNOWN_HELPERS = new Set([
-  'changeConsent', 'changeSaved', 'claimOffer', 'connectNow', 'copyCode', 'disconnectNow', 'DrawerRow', 'fetchCatalogue', 'forgetNoneLeft',
+  'changeConsent', 'changeSaved', 'claimOffer', 'connectNow', 'copyCode', 'countWaiting', 'disconnectNow', 'DrawerRow', 'fetchCatalogue', 'forgetNoneLeft',
   'forgetServerData', 'forgetTextsChanged', 'holdSaved', 'isAccepted', 'isUnreachable', 'loadCatalog', 'loadCodes', 'loadConnection',
   'loadConsent', 'loadDocument', 'loadNoneLeft', 'loadRelease', 'loadReleaseIfUsed', 'loadSaved', 'networkTick', 'noteNoneLeft', 'paintStatus',
   'pruneCodes', 'readLimits', 'redraw', 'refreshStatus', 'resetSaved', 'saveNoneLeft', 'send', 'sendWithdrawal', 'settleConsent',

@@ -388,7 +388,7 @@ test('requests: one built-in https address, and only the fields the server desig
   expect([connect.url, claim.url, withdraw.url, list.url]).toEqual([`${BASE_URL}connect`, `${BASE_URL}claim`, `${BASE_URL}withdraw`, `${BASE_URL}catalogue2`])
 
   // Connect: no token, no identifier of any kind.
-  expect(JSON.parse(connect.body!)).toEqual({ ...VERSIONS, addonVersion: '0.21.0' })
+  expect(JSON.parse(connect.body!)).toEqual({ ...VERSIONS, addonVersion: ADDON_VERSION })
   expect(Object.keys(connect.headers)).toEqual(['content-type'])
   // The offer list: anonymous. No token, no body, no query.
   // No If-None-Match either: nothing the server chose earlier goes back to it (finding 6).
@@ -413,7 +413,7 @@ test('requests: one built-in https address, and only the fields the server desig
   expect(withdrawRequest('short', VERSIONS)).toBe(undefined)
   // The versions sent fit the server's own pattern.
   expect(Object.values(VERSIONS).every(item => /^[0-9A-Za-z.-]{1,20}$/.test(item))).toBe(true)
-  expect(ADDON_VERSION).toBe('0.21.0')
+  expect(ADDON_VERSION).toBe('0.21.1')
 })
 
 const reply = (status: number, body: unknown, headers: Record<string, string> = {}) => ({ status, text: typeof body === 'string' ? body : JSON.stringify(body), headers })
@@ -613,7 +613,7 @@ test('connection record: a press made by a newer add-on under other texts is lef
   expect(linked().addonVersion).toBe(ADDON_VERSION)
   expect(readConnection(JSON.parse(JSON.stringify(linked()))).addonVersion).toBe(ADDON_VERSION)
 
-  for (const newer of ['0.21.1', '0.22.0', '1.0.0']) {
+  for (const newer of ['0.21.2', '0.22.0', '1.0.0']) {
     const record = press({ versions: OLDER_TEXTS.Terms, addonVersion: newer })
 
     expect(isFromNewerAddon(record)).toBe(true)
@@ -1185,7 +1185,7 @@ stage('one press accepts the Terms and Privacy Policy, confirms 18 or older, and
   expect(consent.history.map(item => item.event)).toEqual(['given'])
   // Connected in the same press: one Connect request with the Stage B versions, then the list.
   expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
-  expect(JSON.parse(sent[0].body!)).toEqual({ wordingVersion: 'stage-b-1', termsVersion: '1.0', privacyVersion: '1.0', addonVersion: '0.21.0' })
+  expect(JSON.parse(sent[0].body!)).toEqual({ wordingVersion: 'stage-b-1', termsVersion: '1.0', privacyVersion: '1.0', addonVersion: ADDON_VERSION })
   const record = readConnection(store.get('connection'))
   expect(isConnected(record)).toBe(true)
   expect(record.versions).toEqual(VERSIONS)
@@ -1561,7 +1561,7 @@ stage('the Connect press: one request with the versions only, then the anonymous
   expect(await press($, 'connect-press')).toBe(true)
 
   expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
-  expect(JSON.parse(sent[0].body!)).toEqual({ ...VERSIONS, addonVersion: '0.21.0' })
+  expect(JSON.parse(sent[0].body!)).toEqual({ ...VERSIONS, addonVersion: ADDON_VERSION })
   expect(Object.keys(sent[0].headers)).toEqual(['content-type'])
   // The list is fetched with no token, no body and no query.
   expect(sent[1]).toEqual({ url: `${BASE_URL}catalogue2`, method: 'GET', headers: {}, body: undefined })
@@ -2976,7 +2976,7 @@ stage('changed texts: the old install is withdrawn first, nothing is fetched or 
   sent.length = 0
   expect(await press($, 'connect-press')).toBe(true)
   expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
-  expect(JSON.parse(sent[0].body!)).toEqual({ ...VERSIONS, addonVersion: '0.21.0' })
+  expect(JSON.parse(sent[0].body!)).toEqual({ ...VERSIONS, addonVersion: ADDON_VERSION })
 
   const after = readConnection(store.get('connection'))
   expect(isConnected(after)).toBe(true)

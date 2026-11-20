@@ -442,6 +442,31 @@ async function refreshStatus($: EngineInterface) {
   syncPresentTimer($)
 }
 
+// The band updates still to be counted, in order (see the AbovePrompt render).
+let bandWork: Promise<void> = Promise.resolve()
+
+async function countWaiting($: EngineInterface, isWorking: boolean, at: Promise<number>) {
+  const now = await at
+
+  if (!isRunning(viewOf(await loadConsent($), now))) {
+    waitTimer.update(false, 0)
+
+    return
+  }
+
+  const finishedMs = waitTimer.update(isWorking, now)
+
+  isWorkingNow = isWorking
+  syncAnimation($)
+
+  if (finishedMs !== undefined) {
+    const { rewards } = await loadCatalog($)
+    // After Connect the minutes are still counted, but no practice reward is earned.
+    const isLinked = isConnected(await loadConnection($))
+    await changeSaved($, saved => (isLinked ? addWait(saved, finishedMs, [], false) : addWait(saved, finishedMs, rewards)))
+  }
+}
+
 function syncPresentTimer($: EngineInterface) {
   if (isFirstWaitPending && presentTimer === undefined) {
     presentTimer = $.clock.every(PRESENT_TICK_MS, () => refreshStatus($))
@@ -634,25 +659,16 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Counts waiting time from `isWorking` and the clock, and draws nothing.
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!isRunning(viewOf(await loadConsent($), await $.clock.now()))) {
-      waitTimer.update(false, 0)
-
-      return next(e)
-    }
-
-    const finishedMs = waitTimer.update(e.props.isWorking, await $.clock.now())
-
-    isWorkingNow = e.props.isWorking
-    syncAnimation($)
-
-    if (finishedMs !== undefined) {
-      const { rewards } = await loadCatalog($)
-      // After Connect the minutes are still counted, but no practice reward is earned.
-      const isLinked = isConnected(await loadConnection($))
-      await changeSaved($, saved => (isLinked ? addWait(saved, finishedMs, [], false) : addWait(saved, finishedMs, rewards)))
-    }
+  // Counts waiting time from `isWorking` and the clock, and draws nothing. The
+  // band above the prompt (where the tool's own spinner is) is passed on at
+  // once: Pauzza never makes it wait for a saved-data read (0.21.1). The
+  // counting follows, one band update after another, in the order they came.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    const isWorking = e.props.isWorking === true
+    // The time of this update is asked for now, so a slow read cannot shift it.
+    const at = $.clock.now()
+    at.catch(() => undefined)
+    bandWork = bandWork.then(() => countWaiting($, isWorking, at)).catch(() => undefined)
 
     return next(e)
   })

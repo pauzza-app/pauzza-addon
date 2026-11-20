@@ -10,7 +10,7 @@ import { CODE_FORMAT, ID_FORMAT, parseIso, VERSION_FORMAT as ADDON_VERSION_FORMA
 export const BASE_URL = 'https://pwchzyltlirhiiaxoifb.supabase.co/functions/v1/'
 // Must equal the version in `.claude-plugin/plugin.json`. Sent at Connect, and
 // compared with the signed list's minimum version.
-export const ADDON_VERSION = '0.21.0'
+export const ADDON_VERSION = '0.21.1'
 
 export type Endpoint = 'connect' | 'catalogue2' | 'claim' | 'withdraw'
 export type Outgoing = { url: string; method: 'GET' | 'POST'; headers: Record<string, string>; body?: string }

@@ -196,7 +196,12 @@ function fakeEngine(on: any, nowMs = NINE_AM, rateLimits: () => unknown[] = () =
   const seen: { drewEngine: number } = { drewEngine: 0 }
   const clock = mock.clock(on, { now: nowMs })
   const store = new Map<string, unknown>([['saved', savedSeed], ...(consentSeed === undefined ? [] : [['consent', consentSeed] as [string, unknown]])])
-  on('store.get', (_: unknown, e: { key: string }) => ({ value: store.get(e.key) }))
+  on('store.get', async (_: unknown, e: { key: string }) => {
+    // A test can hold every read back, as a slow saved-data store would.
+    await storeGate
+
+    return { value: store.get(e.key) }
+  })
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
     store.set(e.key, e.value)
 
@@ -249,10 +254,18 @@ function fakeEngine(on: any, nowMs = NINE_AM, rateLimits: () => unknown[] = () =
   return { clock, seen, lines, opened, toasts, store, reads, sent }
 }
 
+// Every saved-data read waits on this; a test may hold it back.
+let storeGate: Promise<void> = Promise.resolve()
+// The band is passed on at once and the waiting time is counted after it (0.21.1): let that finish.
+const drainBand = async () => {
+  for (let i = 0; i < 3; i += 1) await new Promise(resolve => setTimeout(resolve, 5))
+}
+
 async function setWorking($: any, isWorking: boolean) {
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, isWorking } })
   const drew = await ui.find({ type: 'Text', text: /engine/ })
   await ui.unmount()
+  await drainBand()
 
   return drew
 }
@@ -307,6 +320,30 @@ engineTest('minutes count only while working, and the band draws nothing of its 
   await setWorking($, false)
   await clock.advance(10 * MINUTE)
 
+  expect(lines.at(-1)).toContain('⏳ 5m')
+})
+
+engineTest('the band above the prompt is drawn at once, even while saved data is slow to read (0.21.1)', async ($, on) => {
+  const { clock, lines } = fakeEngine(on)
+  const picking = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await chooseMeter(picking, 'line42')
+  await picking.unmount()
+  let open = () => {}
+  storeGate = new Promise(resolve => { open = resolve })
+
+  try {
+    // Every read is held back, yet the band is drawn for both updates.
+    expect(await setWorking($, true)).toBeDefined()
+    await clock.advance(5 * MINUTE)
+    expect(await setWorking($, false)).toBeDefined()
+  } finally {
+    open()
+    storeGate = Promise.resolve()
+  }
+
+  // Once the reads go through, the minutes are counted, in order.
+  await drainBand()
+  await clock.advance(MINUTE)
   expect(lines.at(-1)).toContain('⏳ 5m')
 })
 

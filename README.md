@@ -1,10 +1,12 @@
 # Pauzza
 
-Version 0.21.0. A small terminal-style meter sits on the status line, and typing `/pauzza` opens a panel of offers and promo codes. Before you press Connect, the panel shows built-in samples, such as "Test Pizza" with code TEST-0001, which work at no shop.
+Version 0.21.1. A small terminal-style meter sits on the status line, and typing `/pauzza` opens a panel of offers and promo codes. Before you press Connect, the panel shows built-in samples, such as "Test Pizza" with code TEST-0001, which work at no shop.
 
 New in 0.20.0, simplified in 0.20.1 and 0.20.2: a separate **Connect** step. Until you press "Connect", the add-on sends nothing and works from its built-in samples, exactly as before. After it, offers and promo codes come from Pauzza's server.
 
 New in 0.21.0: once connected, only the offers in Pauzza's signed list show; the practice prizes stay for the time before "Connect". The signed list can put an offer in a special place: the daily offer, a prize for reaching the 5-hour or the weekly usage limit, or a present some time after connecting. It can also group offers in a campaign, such as Black Friday. A line under the drawers says when a newer Pauzza is out. This version asks for the list at a new address, `catalogue2`, and reads only the new list format; a list saved by 0.20.2 is not used.
+
+New in 0.21.1: the band above the chat box, where your AI tool shows that it is working, is never held up by Pauzza. Pauzza counts the waiting time after the band is drawn, so the tool's own animation keeps moving even when saved data is slow to read.
 
 ## The official copy
 
@@ -12,7 +14,7 @@ The only official copy is `https://github.com/pauzza-app/pauzza-addon`, and it i
 
 Pauzza never asks for your card details or passwords, and never asks you to run a command to claim a prize. If something using the Pauzza name does, it is not us.
 
-## Connecting to Pauzza's server (version 0.21.0)
+## Connecting to Pauzza's server (version 0.21.0 and later)
 
 ### Before you press "Connect"
 
