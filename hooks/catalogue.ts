@@ -19,28 +19,44 @@ export const MAX_ENVELOPE_BYTES = MAX_CATALOG_CHARS
 const MAX_LABEL = 24
 const MAX_LIST = 200
 const MAX_LIFETIME_DAYS = 14
-const ID_FORMAT = /^[a-z0-9-]{1,40}$/
+// Shared with the rest of the add-on: ids, x.y.z versions and Tbilisi time.
+export const ID_FORMAT = /^[a-z0-9-]{1,40}$/
 const MERCHANT_ID_FORMAT = /^[a-z0-9-]{1,24}$/
 // Pop-ups choose a built-in line by name and carry no text.
 export const POPUP_TEMPLATES: readonly string[] = ['daily-offer', 'limit-lounge']
-const VERSION_FORMAT = /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/
+export const POPUP_TEMPLATES_V2: readonly string[] = ['daily-offer', 'limit-lounge', 'event-start', 'news']
+// Format 2: where an offer shows, and the built-in looks of a campaign (event).
+export const SLOTS: readonly string[] = ['daily', 'limit-5h', 'limit-week', 'present']
+export const EVENT_LOOKS: readonly string[] = ['sale', 'black-friday', 'new-year', 'valentine', 'summer', 'back-to-school', 'special', 'spotlight', 'fresh']
+// Format 2 categories: 20 built in and 4 the owner names. Format 1 keeps KNOWN_CATEGORIES.
+export const CATEGORIES_V2: readonly string[] = ['food', 'drinks', 'groceries', 'tickets', 'gadgets', 'fashion', 'beauty', 'health', 'sport', 'travel', 'transport', 'education', 'software', 'services', 'finance', 'insurance', 'home', 'games', 'kids', 'other', 'custom-1', 'custom-2', 'custom-3', 'custom-4']
+const MAX_EVENTS = 3
+const MAX_EVENT_DAYS = 62
+const MIN_PRESENT_AGE_SECONDS = 60
+// Format 2 carries no merchant, code type or budget: those stay on the server, and the list holds only
+// their sealed fingerprint, which this add-on checks for shape and never reads.
+const PRIVATE_DIGEST_FORMAT = /^[0-9a-f]{64}$/
+// Georgia has kept UTC+4 all year since 2005, with no daylight saving, so
+// Tbilisi time is a fixed offset.
+export const TBILISI_OFFSET_MS = 4 * 3_600_000
+const HHMM_FORMAT = /^([01]\d|2[0-3]):[0-5]\d$/
+export const VERSION_FORMAT = /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/
 const ISO_FORMAT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
 const HOST_FORMAT = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/
 
+// What this add-on reads of a campaign and an offer, in either format. Format 1 also carries the
+// merchant, the code type and both budgets (CampaignV1, ServerOfferV1); format 2 does not (those stay on
+// the server), and nothing here reads them.
 export type Campaign = {
   id: string
-  codeModel: 'list' | 'generated'
   opensAt: string
   claimBy: string
   useBy: string
   minInstallAgeSeconds: number
-  hourlyBudget: number
-  totalBudget: number
 }
 
 export type ServerOffer = {
   id: string
-  merchantId: string
   brand: string
   text: string
   category: string
@@ -48,20 +64,33 @@ export type ServerOffer = {
   campaign: Campaign
 }
 
+export type CampaignV1 = Campaign & { codeModel: 'list' | 'generated'; hourlyBudget: number; totalBudget: number }
+export type ServerOfferV1 = ServerOffer & { merchantId: string; campaign: CampaignV1 }
+
 export type PopupRule = { id: string; template: string; maxPerDay: number }
 
-export type Catalogue = {
-  v: 1
+export type Slot = 'daily' | 'limit-5h' | 'limit-week' | 'present'
+export type EventLook = 'sale' | 'black-friday' | 'new-year' | 'valentine' | 'summer' | 'back-to-school' | 'special' | 'spotlight' | 'fresh'
+export type CatalogueEvent = { id: string; name: string; startsAt: string; endsAt: string; look: EventLook }
+export type ServerOfferV2 = ServerOffer & { slot?: Slot; eventId?: string }
+
+type CatalogueBase = {
   seq: number
   issuedAt: string
   expiresAt: string
   minAddonVersion: string
   allowedLinkHosts: string[]
   categories: { id: string; label: string }[]
-  offers: ServerOffer[]
-  schedule: { timeZone: 'Asia/Tbilisi'; dailyOfferOpens: string; firstPresentAfterSeconds: number }
   popupRules: PopupRule[]
 }
+
+export type CatalogueV1 = CatalogueBase & {
+  v: 1; offers: ServerOfferV1[]; schedule: { timeZone: 'Asia/Tbilisi'; dailyOfferOpens: string; firstPresentAfterSeconds: number }
+}
+export type CatalogueV2 = CatalogueBase & {
+  v: 2; latestAddonVersion: string; events: CatalogueEvent[]; offers: ServerOfferV2[]; schedule: { dailyOfferOpens: string }; privateDigest: string
+}
+export type Catalogue = CatalogueV1 | CatalogueV2
 
 type Envelope = { v: 1; keyId: string; payload: string; sig: string }
 type Errors = string[]
@@ -109,11 +138,33 @@ function checkIso(value: unknown, where: string, errors: Errors): number {
   return time
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+
+// Minutes after midnight, Tbilisi time, of an exact minute (seconds and
+// milliseconds 0); NaN for any other time.
+function tbilisiMinute(time: number): number {
+  const local = time + TBILISI_OFFSET_MS
+
+  if (!Number.isFinite(local) || local % 60_000 !== 0) {
+    return NaN
+  }
+
+  return (((local % 86_400_000) + 86_400_000) % 86_400_000) / 60_000
+}
+
+// Sorted by start, each range must start at or after the previous one ends.
+function overlaps(ranges: [number, number][]): boolean {
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0])
+
+  return sorted.some((range, index) => index > 0 && range[0] < sorted[index - 1]![1])
+}
+
 const isPlainHost = (host: unknown): host is string => typeof host === 'string' && HOST_FORMAT.test(host) && !host.split('.').some(label => label.startsWith('xn--'))
 
 // The host of a signed destination, or undefined: https only, an exact host
-// from the signed list, no user name, port or punycode. The add-on never opens
-// this address itself; it shows the host beside its own fixed link.
+// from the signed list, no user name, port or punycode. The add-on opens only a
+// link that passes this on the held, verified list (`offerLink` in display.ts),
+// and shows this host as its label.
 export function checkLink(url: unknown, allowedHosts: readonly string[]): string | undefined {
   if (typeof url !== 'string' || url.length > 300 || /[\s\\]/.test(url)) {
     return undefined
@@ -150,19 +201,58 @@ const FORBIDDEN_WORDS = [
 export function reviewText(text: string): string | undefined {
   const lower = text.toLowerCase()
 
-  return FORBIDDEN_WORDS.find(word => (word === 'pin' ? /\bpin\b/.test(lower) : lower.includes(word)))
+  return FORBIDDEN_WORDS.find(word => (word === 'pin' ? /\bpin\b/.test(lower) : lower.includes(word))) ?? webAddress(text)
 }
 
+// A web address written without its scheme (finding 9 of the 2026-11-12 review). A run of letters,
+// digits, dots and dashes is an address when a part after a dot is a top-level name on this short
+// list (pizza.ge, EXAMPLE.COM, shop.example.co.uk), when it starts with "www.", or when a path
+// follows it (example.zip/deal). Abbreviations and numbers pass: e.g., i.e., a.m., No.1, 2.5, 10.00,
+// Mon.-Fri., 9.30am, v2.0. Not caught: an address on another top-level name with neither "www." nor
+// a path (deal.zip), or one written with spaces or words for the dot; the owner's review is the last
+// check. The block from ADDRESS_TLDS to the end of webAddress is the same text in
+// server/supabase/functions/_shared/catalogue.ts: a test there compares them.
+export const ADDRESS_TLDS: readonly string[] = ['ai', 'am', 'app', 'az', 'biz', 'by', 'cc', 'co', 'com', 'de', 'dev', 'edu', 'eu', 'ge', 'gov', 'info', 'io', 'kz', 'link', 'me', 'net', 'online', 'org', 'pizza', 'pro', 'ru', 'shop', 'site', 'store', 'tech', 'top', 'tr', 'tv', 'ua', 'uk', 'us', 'xyz', '\u10D2\u10D4']
+
+// The address as written, or undefined.
+export function webAddress(text: string): string | undefined {
+  for (const found of text.matchAll(/[\p{L}\p{N}.-]+/gu)) {
+    const run = found[0]
+    const parts = run.toLowerCase().split('.')
+    const after = text.charAt((found.index ?? 0) + run.length)
+
+    if (
+      parts.some((part, i) => i > 0 && ADDRESS_TLDS.includes(part) && /[\p{L}\p{N}]/u.test(parts[i - 1] ?? '')) ||
+      (parts[0] === 'www' && parts.length > 1 && parts[1] !== '') ||
+      (after === '/' && /[\p{L}\p{N}]\.\p{L}{2}/u.test(run))
+    ) {
+      return run.replace(/^[.-]+|[.-]+$/g, '')
+    }
+  }
+
+  return undefined
+}
+
+// Either format, as the server's check. Format 1 has the fields 0.20.2 reads,
+// checked as 0.20.2 checks them, with one rule more: this add-on also refuses a
+// web address written into a brand, offer text or category label (webAddress,
+// finding 9; in format 2 also a campaign name), which 0.20.2 does not check. The
+// list's fields are unchanged. Format 2 adds latestAddonVersion, events, an offer's optional slot or
+// eventId, the wider set of categories and privateDigest, and has no merchantId,
+// codeModel, hourlyBudget or totalBudget, and no schedule timeZone or
+// firstPresentAfterSeconds: any of them refuses the list. Which format this
+// release wants is acceptCatalogue's choice.
 export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalogue } | { ok: false; errors: string[] } {
   const errors: Errors = []
+  const v2 = isRecord(data) && data.v === 2
   const top = ['v', 'seq', 'issuedAt', 'expiresAt', 'minAddonVersion', 'allowedLinkHosts', 'categories', 'offers', 'schedule', 'popupRules']
 
-  if (!exactKeys(data, top, [], 'catalogue', errors)) {
+  if (!exactKeys(data, v2 ? [...top, 'latestAddonVersion', 'events', 'privateDigest'] : top, [], 'catalogue', errors)) {
     return { ok: false, errors }
   }
 
-  if (data.v !== 1) {
-    errors.push('v must be 1')
+  if (data.v !== 1 && data.v !== 2) {
+    errors.push('v must be 1 or 2')
   }
 
   if (!isInt(data.seq, 1, Number.MAX_SAFE_INTEGER)) {
@@ -184,6 +274,14 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
     errors.push('minAddonVersion must be x.y.z')
   }
 
+  if (v2 && (typeof data.latestAddonVersion !== 'string' || !VERSION_FORMAT.test(data.latestAddonVersion))) {
+    errors.push('latestAddonVersion must be x.y.z')
+  }
+
+  if (v2 && (typeof data.privateDigest !== 'string' || !PRIVATE_DIGEST_FORMAT.test(data.privateDigest))) {
+    errors.push('privateDigest must be 64 lower-case hex characters')
+  }
+
   const hosts = data.allowedLinkHosts
 
   if (!Array.isArray(hosts) || hosts.length > 50 || !hosts.every(isPlainHost)) {
@@ -194,8 +292,9 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
   const ids = new Set<string>()
   const campaignIds = new Set<string>()
   const categoryIds = new Set<string>()
+  const knownCategories = v2 ? CATEGORIES_V2 : KNOWN_CATEGORIES
 
-  if (!Array.isArray(data.categories) || data.categories.length > KNOWN_CATEGORIES.length) {
+  if (!Array.isArray(data.categories) || data.categories.length > knownCategories.length) {
     errors.push('categories must be a short list')
   } else {
     data.categories.forEach((category: unknown, index: number) => {
@@ -205,17 +304,76 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
         return
       }
 
-      if (typeof category.id !== 'string' || !KNOWN_CATEGORIES.includes(category.id) || categoryIds.has(category.id)) {
+      if (typeof category.id !== 'string' || !knownCategories.includes(category.id) || categoryIds.has(category.id)) {
         errors.push(`${where}: unknown or repeated category`)
       } else {
         categoryIds.add(category.id)
       }
 
-      if (checkText(category.label, MAX_LABEL) === undefined) {
+      // A label is a drawer's name: no web address in it either (finding 9).
+      const label = checkText(category.label, MAX_LABEL)
+
+      if (label === undefined || webAddress(label) !== undefined) {
         errors.push(`${where}: label not allowed`)
       }
     })
   }
+
+  // Events come before offers, which may name them.
+  const eventIds = new Set<string>()
+  const eventRanges: [number, number][] = []
+
+  if (v2) {
+    if (!Array.isArray(data.events) || data.events.length > MAX_EVENTS) {
+      errors.push(`events must be a list of at most ${MAX_EVENTS}`)
+    } else {
+      data.events.forEach((event: unknown, index: number) => {
+        const where = `events[${index}]`
+
+        if (!exactKeys(event, ['id', 'name', 'startsAt', 'endsAt', 'look'], [], where, errors)) {
+          return
+        }
+
+        if (typeof event.id !== 'string' || !ID_FORMAT.test(event.id) || eventIds.has(event.id)) {
+          errors.push(`${where}: bad or repeated id`)
+        } else {
+          eventIds.add(event.id)
+        }
+
+        const name = checkText(event.name, MAX_LABEL)
+
+        if (name === undefined) {
+          errors.push(`${where}: name has characters or length that are not allowed`)
+        } else if (reviewText(name) !== undefined) {
+          errors.push(`${where}: name fails the offer review`)
+        }
+
+        const starts = checkIso(event.startsAt, `${where}.startsAt`, errors)
+        const ends = checkIso(event.endsAt, `${where}.endsAt`, errors)
+
+        if (!(starts < ends)) {
+          errors.push(`${where}: needs startsAt < endsAt`)
+        } else if (ends - starts > MAX_EVENT_DAYS * 86_400_000) {
+          errors.push(`${where}: longer than ${MAX_EVENT_DAYS} days`)
+        } else {
+          eventRanges.push([starts, ends])
+        }
+
+        if (typeof event.look !== 'string' || !EVENT_LOOKS.includes(event.look)) {
+          errors.push(`${where}: unknown look`)
+        }
+      })
+
+      if (overlaps(eventRanges)) {
+        errors.push('events overlap')
+      }
+    }
+  }
+
+  const schedule = data.schedule
+  const opensAt = isRecord(schedule) && typeof schedule.dailyOfferOpens === 'string' && HHMM_FORMAT.test(schedule.dailyOfferOpens) ? schedule.dailyOfferOpens : undefined
+  const dailyMinute = opensAt === undefined ? NaN : Number(opensAt.slice(0, 2)) * 60 + Number(opensAt.slice(3))
+  const dailyRanges: [number, number][] = []
 
   if (!Array.isArray(data.offers) || data.offers.length > MAX_LIST) {
     errors.push('offers must be a short list')
@@ -223,7 +381,7 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
     data.offers.forEach((offer: unknown, index: number) => {
       const where = `offers[${index}]`
 
-      if (!exactKeys(offer, ['id', 'merchantId', 'brand', 'text', 'category', 'campaign'], ['link'], where, errors)) {
+      if (!exactKeys(offer, v2 ? ['id', 'brand', 'text', 'category', 'campaign'] : ['id', 'merchantId', 'brand', 'text', 'category', 'campaign'], v2 ? ['link', 'slot', 'eventId'] : ['link'], where, errors)) {
         return
       }
 
@@ -233,7 +391,7 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
         ids.add(offer.id)
       }
 
-      if (typeof offer.merchantId !== 'string' || !MERCHANT_ID_FORMAT.test(offer.merchantId)) {
+      if (!v2 && (typeof offer.merchantId !== 'string' || !MERCHANT_ID_FORMAT.test(offer.merchantId))) {
         errors.push(`${where}: bad merchantId`)
       }
 
@@ -247,7 +405,8 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
         }
       }
 
-      if (typeof offer.category !== 'string' || !KNOWN_CATEGORIES.includes(offer.category)) {
+      // Format 2: only a category the list carries, so an offer never sits in a drawer that does not exist.
+      if (typeof offer.category !== 'string' || !(v2 ? categoryIds.has(offer.category) : KNOWN_CATEGORIES.includes(offer.category))) {
         errors.push(`${where}: unknown category`)
       }
 
@@ -255,10 +414,24 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
         errors.push(`${where}: link not allowed`)
       }
 
+      if (offer.slot !== undefined && (typeof offer.slot !== 'string' || !SLOTS.includes(offer.slot))) {
+        errors.push(`${where}: unknown slot`)
+      }
+
+      if (offer.eventId !== undefined && (typeof offer.eventId !== 'string' || !eventIds.has(offer.eventId))) {
+        errors.push(`${where}: eventId names no event`)
+      }
+
+      if (offer.slot !== undefined && offer.eventId !== undefined) {
+        errors.push(`${where}: slot and eventId together`)
+      }
+
       const campaign = offer.campaign
       const at = `${where}.campaign`
 
-      if (!exactKeys(campaign, ['id', 'codeModel', 'opensAt', 'claimBy', 'useBy', 'minInstallAgeSeconds', 'hourlyBudget', 'totalBudget'], [], at, errors)) {
+      const campaignKeys = v2 ? ['id', 'opensAt', 'claimBy', 'useBy', 'minInstallAgeSeconds'] : ['id', 'codeModel', 'opensAt', 'claimBy', 'useBy', 'minInstallAgeSeconds', 'hourlyBudget', 'totalBudget']
+
+      if (!exactKeys(campaign, campaignKeys, [], at, errors)) {
         return
       }
 
@@ -268,7 +441,7 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
         campaignIds.add(campaign.id)
       }
 
-      if (campaign.codeModel !== 'list' && campaign.codeModel !== 'generated') {
+      if (!v2 && campaign.codeModel !== 'list' && campaign.codeModel !== 'generated') {
         errors.push(`${at}: codeModel must be list or generated`)
       }
 
@@ -284,28 +457,48 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
         errors.push(`${at}: bad minInstallAgeSeconds`)
       }
 
-      if (!isInt(campaign.hourlyBudget, 1, 100_000)) {
+      if (!v2 && !isInt(campaign.hourlyBudget, 1, 100_000)) {
         errors.push(`${at}: bad hourlyBudget`)
       }
 
-      if (!isInt(campaign.totalBudget, 1, 1_000_000)) {
+      if (!v2 && !isInt(campaign.totalBudget, 1, 1_000_000)) {
         errors.push(`${at}: bad totalBudget`)
       }
+
+      if (offer.slot === 'daily') {
+        if (tbilisiMinute(opens) !== dailyMinute) {
+          errors.push(`${where}: daily offer must open at dailyOfferOpens, Tbilisi time`)
+        }
+
+        if (claimBy - opens > 86_400_000) {
+          errors.push(`${where}: daily offer claimBy over 24 hours after opensAt`)
+        }
+
+        if (Number.isFinite(opens) && Number.isFinite(claimBy)) {
+          dailyRanges.push([opens, claimBy])
+        }
+      }
+
+      if (offer.slot === 'present' && !isInt(campaign.minInstallAgeSeconds, MIN_PRESENT_AGE_SECONDS, 366 * 86_400)) {
+        errors.push(`${where}: present needs minInstallAgeSeconds of at least ${MIN_PRESENT_AGE_SECONDS}`)
+      }
     })
+
+    if (overlaps(dailyRanges)) {
+      errors.push('daily offers overlap')
+    }
   }
 
-  const schedule = data.schedule
-
-  if (exactKeys(schedule, ['timeZone', 'dailyOfferOpens', 'firstPresentAfterSeconds'], [], 'schedule', errors)) {
-    if (schedule.timeZone !== 'Asia/Tbilisi') {
+  if (exactKeys(schedule, v2 ? ['dailyOfferOpens'] : ['timeZone', 'dailyOfferOpens', 'firstPresentAfterSeconds'], [], 'schedule', errors)) {
+    if (!v2 && schedule.timeZone !== 'Asia/Tbilisi') {
       errors.push('schedule.timeZone must be Asia/Tbilisi')
     }
 
-    if (typeof schedule.dailyOfferOpens !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.dailyOfferOpens)) {
+    if (typeof schedule.dailyOfferOpens !== 'string' || !HHMM_FORMAT.test(schedule.dailyOfferOpens)) {
       errors.push('schedule.dailyOfferOpens must be HH:MM')
     }
 
-    if (!isInt(schedule.firstPresentAfterSeconds, 0, 86_400)) {
+    if (!v2 && !isInt(schedule.firstPresentAfterSeconds, 0, 86_400)) {
       errors.push('schedule.firstPresentAfterSeconds bad')
     }
   }
@@ -324,7 +517,7 @@ export function validateCatalogue(data: unknown): { ok: true; catalogue: Catalog
         errors.push(`${where}: bad id`)
       }
 
-      if (typeof rule.template !== 'string' || !POPUP_TEMPLATES.includes(rule.template)) {
+      if (typeof rule.template !== 'string' || !(v2 ? POPUP_TEMPLATES_V2 : POPUP_TEMPLATES).includes(rule.template)) {
         errors.push(`${where}: unknown template`)
       }
 
@@ -391,8 +584,11 @@ export function compareVersions(a: string, b: string): number {
 export type AcceptResult = { ok: true; catalogue: Catalogue; showOffers: boolean } | { ok: false; reason: string }
 
 // What the device does with a fetched list. Any failure means: keep the last
-// good list, silently.
-export async function acceptCatalogue(text: unknown, opts: { pinnedKeys: PinnedKeys; lastSeq: number; now: number; addonVersion: string }): Promise<AcceptResult> {
+// good list, silently. A list of any format but the one asked for is refused
+// ("wrong format"), as the server's check does with its own `format`. The
+// format must be named: this add-on asks for format 2 only, and a missing or
+// unknown `format` refuses every list.
+export async function acceptCatalogue(text: unknown, opts: { pinnedKeys: PinnedKeys; lastSeq: number; now: number; addonVersion: string; format: 1 | 2 }): Promise<AcceptResult> {
   try {
     const envelope = parseEnvelope(text)
 
@@ -416,6 +612,16 @@ export async function acceptCatalogue(text: unknown, opts: { pinnedKeys: PinnedK
       data = JSON.parse(envelope.payload)
     } catch {
       return { ok: false, reason: 'payload' }
+    }
+
+    // Only a list of the other known format is "wrong format"; any other
+    // value of v is the shape check's to refuse.
+    if (isRecord(data) && (data.v === 1 || data.v === 2) && data.v !== opts.format) {
+      return { ok: false, reason: 'wrong format' }
+    }
+
+    if (opts.format !== 1 && opts.format !== 2) {
+      return { ok: false, reason: 'wrong format' }
     }
 
     const checked = validateCatalogue(data)

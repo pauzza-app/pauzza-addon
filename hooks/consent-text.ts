@@ -1,14 +1,26 @@
-// Every word of the acceptance step, in one file, so a proofreader's edits touch
-// only this file. English only. Rows marked "legal" are the English column of
-// the "Stage 1 wording" table in the legal requirements, with the 2026-11-10
-// "pressing" fix: do not change their meaning without Legal.
+// Every word of the acceptance step that is not on the Connect card, in one
+// file, so a proofreader's edits touch only this file. English only.
+//
+// Since the owner's decision of 2026-11-19 the acceptance is the Connect press
+// itself: one press accepts the Terms and Privacy Policy, confirms 18 or older,
+// and connects. Its words are Legal's Stage B Connect card, in connect-text.ts.
+// What stays from the 2026-11-10 decision: the press is never pre-set and has
+// no auto-focus, "Not now" sits beside it, and nothing runs or is sent before it.
 
-// Raise TERMS_VERSION for a material change: everyone is asked again.
-export const TERMS_VERSION = 'local-1'
-// When that version applies. After this date, people who have not accepted it pause.
-export const TERMS_EFFECTIVE = '2026-11-09'
-// Saved beside each acceptance. A proofreading fix raises this and asks nobody again.
-export const WORDING_VERSION = 'stage-1.4-en'
+// Raise TERMS_VERSION for a material change: everyone is asked again, with the
+// one press. It names the Stage B Terms 1.0 and Privacy Policy 1.0, bundled as
+// TERMS.md and PRIVACY.md; raise it with CONNECT_TERMS_VERSION or
+// CONNECT_PRIVACY_VERSION. It replaced 'local-1' (the local-only Terms, accepted
+// with a separate tick), so everyone who accepted that is asked again.
+export const TERMS_VERSION = 'terms-1.0-privacy-1.0'
+// When that version applies: the Stage B start. Before it, someone who accepted
+// an earlier version keeps running and sees the update notice; from it, Pauzza
+// pauses for them until they press Connect.
+export const TERMS_EFFECTIVE = '2026-11-20'
+// Saved beside each acceptance. A proofreading fix raises this and asks nobody
+// again. The one-press screen: Legal's Connect card (stage-b-1) and the
+// usage-figures line.
+export const WORDING_VERSION = 'stage-b-1-en'
 // One line on what changed. Empty for the first version.
 export const TERMS_CHANGE_NOTE = ''
 
@@ -20,25 +32,21 @@ export type DocumentFile = 'TERMS.md' | 'PRIVACY.md'
 export const documentUrl = (file: DocumentFile, repo = PUBLIC_REPO_URL) => `${repo}/blob/main/${file}`
 
 export const CONSENT_TEXT = {
-  // legal
-  what: 'This is a test version: every offer and code is made up and works nowhere. Pauzza sends nothing from your computer and does not read your code, prompts or conversations.',
-  tick: '☐ I accept the Terms',
+  // Beside the Connect press on the first screen and the update notice.
   later: 'Not now',
-  age: 'By pressing you confirm you are 18 or older.',
+  // Settings: the two documents the press accepted.
   terms: 'Terms',
   privacy: 'Privacy',
-  cancelIn: 'Cancel in ⚙',
   settingOn: '☑ Pauzza is on',
   settingWarn: 'If you switch Pauzza off, it stops and saved data is deleted.',
   updated: 'Terms updated',
-  updateTick: '☐ I accept the updated terms',
   samples: 'Samples · not real offers',
 
   // From the approved design, adjusted so that nothing here says "consent".
   invite: '👋 to turn on · /pauzza',
   updateLine: '📄 Terms updated · /pauzza',
-  declined: 'OK. Pauzza will show nothing and count nothing. If you change your mind, press "I accept the Terms".',
-  stopped: 'Pauzza is stopped. If you change your mind, press "I accept the Terms".',
+  declined: 'OK. Pauzza will show nothing and count nothing. If you change your mind, press "Connect".',
+  stopped: 'Pauzza is stopped. If you change your mind, press "Connect".',
   stoppedNow: 'Pauzza stopped',
   deletingIn: (seconds: number) => `Saved data will be deleted in ${seconds} s`,
   undo: 'Undo',

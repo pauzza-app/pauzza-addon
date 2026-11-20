@@ -1,5 +1,5 @@
 {
   "name": "pauzza",
-  "version": "0.20.2",
-  "description": "Pauzza practice run: your waiting time earns fictional test rewards in the /pauzza prize menu. A small meter and occasional pop-ups, which you can turn off. Sends nothing until you press Connect; after that, test offers and test codes come from the Pauzza server. Never reads your work."
+  "version": "0.21.0",
+  "description": "Pauzza: offers and promo codes while your AI tool works, in the /pauzza panel. A small meter and occasional pop-ups, which you can turn off. Sends nothing until you press Connect. Never reads your code, prompts or conversations."
 }

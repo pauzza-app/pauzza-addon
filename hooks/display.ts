@@ -1,11 +1,13 @@
 // The last check before anything reaches the screen. Pure.
 //
 // The status line and pop-ups show only text the add-on built itself; a future
-// server may choose among these, never supply words of its own. The only link
-// is the official copy's page for one of the two documents.
+// server may choose among these, never supply words of its own. The links are
+// the official copy's page for one of the two documents, and an offer's own
+// signed address.
 
+import { checkLink } from './catalogue'
 import { OFFER_POPUP } from './connect-text'
-import { BASE_URL } from './server'
+import { LOOK_TEXT, NEWS_POPUP, UPDATE_POPUP } from './slot-text'
 import { BURN_FIVE_POPUP, BURN_WEEK_POPUP, DROP_POPUP } from './waiting-pays'
 
 export const MAX_LINE = 80
@@ -34,7 +36,7 @@ export function checkLine(text: string | undefined): string | undefined {
   return chars.length > MAX_LINE || chars.some(isHidden) ? undefined : text
 }
 
-const POPUPS: ReadonlySet<string> = new Set([DROP_POPUP, BURN_FIVE_POPUP, BURN_WEEK_POPUP, OFFER_POPUP])
+const POPUPS: ReadonlySet<string> = new Set([DROP_POPUP, BURN_FIVE_POPUP, BURN_WEEK_POPUP, OFFER_POPUP, NEWS_POPUP, UPDATE_POPUP, ...Object.values(LOOK_TEXT).map(look => look.popup)])
 
 export function isBuiltInPopup(text: unknown): text is string {
   return typeof text === 'string' && POPUPS.has(text)
@@ -47,13 +49,24 @@ export function officialLink(url: string): string | undefined {
   return OFFICIAL_DOCUMENT.test(url) ? url : undefined
 }
 
-const OFFER_LINK = /^https:\/\/pwchzyltlirhiiaxoifb\.supabase\.co\/functions\/v1\/o\/[a-z0-9-]{1,40}$/
+// The characters a link may hold: letters, digits and - . _ ~ : / ? # @ & + , =
+// from RFC 3986's set, and % only before two hex digits, so the address opened
+// is exactly the one signed. No quote, dollar, bracket, semicolon, bang, star,
+// space or anything outside plain ASCII. The same line is in the server's
+// signing check (server/supabase/functions/_shared/catalogue.ts, a test there
+// compares them), which refuses any other link before it is published.
+const LINK_CHARS = /^(?:[A-Za-z0-9\-._~:/?#@&+,=]|%[0-9A-Fa-f]{2})+$/
 
-// The add-on's own fixed link for an offer, else undefined. The server looks
-// the destination up from the signed list; no destination, install or code is
-// ever in the address. Built from the one server address in `server.ts`.
-export function offerLink(offerId: string): string | undefined {
-  const url = `${BASE_URL}o/${offerId}`
+export type OfferLink = { href: string; host: string }
 
-  return OFFER_LINK.test(url) ? url : undefined
+// An offer's link (finding 4 of the 2026-11-12 review): the signed address
+// itself, opened exactly as signed, and its host, shown as the link's label.
+// Called only with the held list, whose signature was checked, and its signed
+// host list: `checkLink` holds the address to https, an exact host from that
+// list, and no user name, port or punycode. Anything else is no link at all.
+// Pauzza's own address is never in it, and opening it sends Pauzza nothing.
+export function offerLink(link: unknown, allowedHosts: readonly string[]): OfferLink | undefined {
+  const host = checkLink(link, allowedHosts)
+
+  return host === undefined || typeof link !== 'string' || !LINK_CHARS.test(link) ? undefined : { href: link, host }
 }

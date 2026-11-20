@@ -1,84 +1,121 @@
 # Pauzza Terms of Use
 
-Version 1.0 · In effect from 9 November 2026
+Version 1.0 · In force from 20 November 2026
 
-This text is also available [in Georgian](https://github.com/pauzza-app/pauzza-addon/blob/main/TERMS.ka.md). Both versions are equally valid. If they differ, the meaning more favourable to you applies.
+## 1. About us
 
-## The short version
+1.1. The Pauzza service is provided by U trust LLC, a limited liability company registered in Georgia, identification code 406273786, legal address: 50/18 Ketevan Tsamebuli Ave / Bochorma St., Commercial Space 5, Block C, Floors 1-2 (duplex), Isani District, Tbilisi, Georgia ("Pauzza", "we", "us").
 
-- This is a free test version. Every offer, code and present in it is made up.
-- Sample codes do not work anywhere and have no value.
-- Pauzza sends nothing from your computer and never reads your code, prompts or conversations.
-- Nothing here takes away your rights under Georgian law.
+1.2. Contact: hello@pauzza.ge.
 
-## 1. Who we are
+1.3. Pauzza is an independent product. It is not made, endorsed or approved by the maker of any AI tool in which it runs.
 
-Pauzza is run by U trust LLC, a limited liability company, ID code 406273786, address: 50/18 Ketevan Tsamebuli Ave / Bochorma St., Commercial Space 5, Block C, Floors 1-2 (duplex), Isani District, Tbilisi, Georgia, hello@pauzza.ge ("we").
+## 2. Definitions
 
-Pauzza is an independent product. It is not made by, approved by or connected with the maker of any AI tool it runs in.
+2.1. **Add-on**: the Pauzza software installed in a user's AI tool.
 
-## 2. What this version is
+2.2. **Service**: the add-on, our server and the offers and codes they provide.
 
-Pauzza is an add-on that draws a small meter and shows sample offers while an AI tool works. It is free. You must be 18 or older to use it.
+2.3. **User** or **you**: a person aged 18 or over who uses the Service.
 
-You accept these Terms by pressing "I accept the Terms" in `/pauzza`. You can read them first. Installing alone does not mean you accept.
+2.4. **Partner**: a business whose offers and codes are shown through the Service.
 
-## 3. Samples only
+2.5. **Offer**: a partner's discount or other benefit shown in the add-on, including daily offers, presents and limit prizes.
 
-All offers, brands, codes, prizes and presents in this version are fictional examples. They:
+2.6. **Code**: a promo code issued through the Service for an offer.
 
-- are not advertising for any real business;
-- cannot be used at any shop;
-- have no cash or other value;
-- give you no right to any goods, discount or prize.
+## 3. Acceptance
 
-The meter and presents are for fun and are not payment for using any AI tool. Usage figures come from the tool and may not be exact.
+3.1. You accept these Terms and the Privacy Policy by pressing "Connect" in the add-on. If you do not agree, do not press "Connect".
 
-## 4. What the add-on does
+3.2. The Service is free of charge for users. It is for persons aged 18 or over. By pressing "Connect" you confirm that you are.
 
-It uses the tool's usage percentages and reset times, and a yes-or-no signal for whether the tool is working. It saves a small record on your computer. The [Privacy Policy](https://github.com/pauzza-app/pauzza-addon/blob/main/PRIVACY.md) lists exactly what.
+## 4. The Service
 
-Like any add-on, it runs with your permissions. You can read its code. Getting it and its updates is done by the AI tool and the site that hosts the code, under their own terms.
+4.1. Pauzza is a marketing platform. It shows partners' offers and issues codes for them. Pauzza is not the seller of any goods or services offered by partners, and does not act on a partner's behalf in any sale.
 
-## 5. Using it
+4.2. We may change, add or remove features, offers and partners at any time, without prior notice.
 
-Please do not use Pauzza unlawfully, or pass off a changed copy as the official one.
+## 5. Partners and their offers
 
-The code is public so that you can read it; its LICENSE file says what else you may do with it. Pauzza's name, look and pictures belong to us or those who licensed them. The licence's disclaimer does not limit any right the law protects.
+5.1. Any sale is a legal relationship between you and the partner alone, without Pauzza's participation.
 
-## 6. Changes and stopping
+5.2. The partner is solely responsible for:
+- its offer and the accuracy of its description;
+- its goods or services, including their price, quality, safety, delivery, warranty and returns;
+- accepting the codes issued for its offer.
 
-**You** can stop at any time: switch Pauzza off in ⚙, then uninstall.
+5.3. Claims about the matters in 5.2 are to be made to the partner. You may also write to hello@pauzza.ge, and we will forward your claim to the partner.
 
-We may change or stop this test version for a good reason, such as a change in law, security, a change by the AI tool, or a technical need. We can end these Terms with 30 days' notice, or at once for a serious reason such as misuse.
+5.4. Offers may contain links to partners' websites, which open only when you press them. We do not control those websites and are not responsible for their content, availability or terms. Their use is governed by the partner's own terms.
 
-For a change that matters, we will tell you in the add-on at least 14 days ahead. You may then stop using Pauzza at no cost.
+## 6. Codes
 
-**A later version may connect to the internet or offer real discounts.** It would not do so under these Terms. It would first show its own terms and ask you to press "Connect".
+6.1. A code is valid only at the partner named in the offer, under the offer's conditions and before its "use by" date.
 
-## 7. Limits on our responsibility
+6.2. A code may be used once. It has no cash value and may not be sold, transferred or copied.
 
-**7.1 Where the limits stop.** Nothing here limits or excludes:
+6.3. Each offer has a limited number of codes and may end before its stated end date. We may limit the number of codes issued per user or per device, as needed to duly provide the Service and prevent misuse.
 
-- responsibility for death or injury to health;
-- responsibility for damage caused intentionally or by gross negligence, by us or those we use;
-- rights under Georgian consumer and personal data law, or any other right the law does not allow to be limited;
-- your right to complain or go to court.
+6.4. Daily offers, presents and limit prizes are offers like any other and follow the same rules.
 
-**7.2 Within those limits,** as this is a free test version:
+## 7. Permitted use
 
-- We are responsible only for direct damage that could be foreseen, and that we caused by breaching these Terms.
-- We are not responsible for lost profit, lost data or other indirect loss caused by ordinary negligence.
-- Our total responsibility for ordinary negligence for any one event is limited to 100 GEL.
+7.1. You must not:
+- use several installs, scripts, automated means or modified copies of the add-on to obtain codes;
+- collect, copy or aggregate offers or codes by automated means;
+- interfere with, overload or attempt to gain unauthorised access to the Service;
+- use the Service for any unlawful purpose.
 
-**7.3** We do not promise the test version will always work. We are not responsible for an AI tool or its maker, or for events outside our reasonable control.
+7.2. If you breach 7.1, we may, without prior notice, end your install's connection to the Service and delete its record.
 
-If a court finds any part invalid, the rest continues to apply.
+## 8. Intellectual property
 
-## 8. Complaints and the law
+8.1. The Pauzza name, logo, design, pictures, texts and software belong to U trust LLC or its licensors.
 
-Write to the email in section 1. We answer within 10 working days.
+8.2. The add-on's code is published so that it can be read. Any other use of it is governed by its LICENSE file. Nothing in these Terms grants a licence to use our name, logo or other intellectual property.
 
-Georgian law applies. You can apply to the Competition and Consumer Protection Agency, the State Audit Service on personal data, or a competent Georgian court.
+8.3. Partners' names and marks belong to the partners.
 
-Both language versions are equally valid. Where wording is unclear, or the versions differ, it is read in your favour.
+## 9. Service provided "as is"
+
+9.1. The Service is provided free of charge, "as is" and "as available".
+
+9.2. We do not warrant that it will be uninterrupted, error-free or available at any particular time, or that any offer or code will remain available.
+
+9.3. The add-on runs with your permissions in your AI tool. We are not responsible for the AI tool or for its maker.
+
+## 10. Limitation of liability
+
+10.1. To the extent permitted by law, we are not liable for:
+- any loss arising from the use of, or inability to use, the Service, including technical failures, interruptions or errors;
+- partners' acts or omissions, their goods or services, or their refusal to accept a code;
+- indirect loss or lost profit.
+
+10.2. We do not take part in disputes between users and partners.
+
+10.3. Nothing in these Terms limits or excludes any liability or right that may not be limited or excluded under Georgian law.
+
+## 11. Force majeure
+
+11.1. We are not liable for any failure or delay caused by circumstances beyond our reasonable control. These include natural disasters, war, acts of public authorities, power or network failures, and failures of service providers or of the AI tool.
+
+## 12. Ending and suspension
+
+12.1. You may stop using the Service at any time, free of charge, by disconnecting in Settings or uninstalling the add-on.
+
+12.2. We may suspend or end the Service, or any part of it, at any time. Codes already issued remain valid at the partner under the offer's conditions.
+
+## 13. Changes to these Terms
+
+13.1. We may amend these Terms. When they change, your earlier connection ends and the add-on shows the amended Terms. To keep receiving offers, press "Connect" again to accept them. Codes you already have remain valid until their "use by" date.
+
+## 14. Final provisions
+
+14.1. These Terms are governed by the laws of Georgia.
+
+14.2. Disputes are to be resolved by negotiation. Failing that, you may apply to the competent authority or to the courts of Georgia.
+
+14.3. If any provision of these Terms is found invalid, the remaining provisions remain in force.
+
+14.4. Notices to us are to be sent to hello@pauzza.ge.

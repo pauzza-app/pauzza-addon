@@ -1,37 +1,49 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-import { blankSvg, dotsSvg, dotsWidth, drawerColour, fadedSvg, hairlineSvg, iconTileSvg, logoTileSvg } from './art'
+import { blankSvg, CATEGORY_EMOJI, dotsSvg, dotsWidth, drawerColour, fadedSvg, hairlineSvg, iconTileSvg, logoTileSvg, lookColour, lookTileSvg } from './art'
 import { loadingSvg, loadingTileSvg } from './loadings'
 import { canAnimate, statusFor, currentWindow, drawMeter, formatReset, isLimited, METERS, presentNote, pickFiveHour, pickLimit, pickWeekly, SAMPLE_PERCENT, statusLine } from './meters'
 import type { MeterDisplay, MeterId, StatusInput } from './meters'
-import { accept, consentLine, decline, dismissUpdate, finishDelete, isRunning, noteInviteSeen, readConsent, shouldDelete, undoSecondsLeft, viewOf, withdraw } from './consent'
+import { accept, consentLine, decline, dismissUpdate, finishDelete, isRunning, noteInviteSeen, readConsent, shouldDelete, undoSecondsLeft, undoWithdraw, viewOf, withdraw } from './consent'
 import type { ConsentRecord } from './consent'
 import { CONSENT_TEXT, documentUrl, hasPublicRepo, TERMS_CHANGE_NOTE } from './consent-text'
 import type { DocumentFile } from './consent-text'
-import { checkLink } from './catalogue'
 import type { Catalogue, ServerOffer } from './catalogue'
-import { canOfferConnect, CONNECT_TEXT, OFFER_POPUP } from './connect-text'
-import { canUndo, isConnected, maskCode, newlyOpen, offerState, readPopups, takePopup, undoSecondsLeft as connectionUndoSecondsLeft } from './connection'
+import { canOfferConnect, CONNECT_DOCUMENTS, CONNECT_TEXT, isTestOver, OFFER_POPUP } from './connect-text'
+import { canUndo, isConnected, isFromNewerAddon, maskCode, newlyOpen, offerState, readPopups, takePopup, undoSecondsLeft as connectionUndoSecondsLeft } from './connection'
+import type { PopupRecord } from './connection'
 import type { ConnectionRecord, StoredCode } from './connection'
 import { checkLine, isBuiltInPopup, officialLink, offerLink } from './display'
+import { readFetchState } from './fetch-schedule'
 import { CODE_FORMAT, parseCatalog, sortOffers } from './offers'
 import {
   claimNote,
   claimOffer,
+  clearCheckNote,
   clearOnceNotes,
   connectNow,
+  currentCheckNote,
   currentConnectNote,
+  currentTryNote,
   currentDisconnectNote,
   disconnectNow,
+  FETCH_KEY,
+  forgetTextsChanged,
+  isNoneLeftRemembered,
   isUnreachable,
+  LIST_FLOOR_KEY,
   loadCodes,
   loadConnection,
+  loadNoneLeft,
+  NONE_LEFT_KEY,
   loadRelease,
   networkTick,
   POPUPS_KEY,
   pruneCodes,
   serverView,
+  signedLatestVersion,
   TICK_MS,
+  tryNow,
   undoDisconnectNow,
   wakeServerLink,
 } from './server-link'
@@ -39,6 +51,8 @@ import type { Catalog, Prize } from './offers'
 import {
   addWait,
   assignFirstMeter,
+  BURN_FIVE_POPUP,
+  BURN_WEEK_POPUP,
   canPopUp,
   claimReward,
   clearMark,
@@ -50,6 +64,7 @@ import {
   nextMilestone,
   noteCopied,
   noteMilestones,
+  pad,
   pickMeter,
   presentProgress,
   reachedMilestones,
@@ -60,12 +75,34 @@ import {
   trackWindow,
 } from './waiting-pays'
 import type { Saved } from './waiting-pays'
+import { ADDON_VERSION } from './server'
+import { lookText, NEWS_POPUP, SLOT_TEXT, UPDATE_POPUP } from './slot-text'
+import {
+  campaignLastDay,
+  campaignOffers,
+  dailyOffer,
+  eventToAnnounce,
+  firstAvailable,
+  isInCategory,
+  isNewer,
+  isNewsDue,
+  isPresent,
+  isUpdateDue,
+  limitPopupKey,
+  limitPrize,
+  limitPrizes,
+  noteEvent,
+  presentLadder,
+  runningEvent,
+} from './slots'
+import type { LimitSlot } from './slots'
 
 const PANE = 'pauzza-offers'
-const PANE_TITLE = 'Pauzza (test)'
+const PANE_TITLE = 'Pauzza'
 const STORE_KEY = 'saved'
 const CONSENT_KEY = 'consent'
-const DRAWER_ICONS: Record<string, string> = { mine: '🎁', day: '⭐', food: '🍕', drinks: '🥤', tickets: '🎟', gadgets: '🎧' }
+// The terminal's drawer emoji. The categories' own emoji, tiles and colours are in art.ts.
+const DRAWER_ICONS: Record<string, string> = { mine: '🎁', day: '⭐', ...CATEGORY_EMOJI }
 const DISPLAY_CHOICES: ReadonlyArray<[MeterDisplay, string]> = [['always', 'Always'], ['ready', 'When ready'], ['off', 'Off']]
 const CARD_FILL = '#8888881A'
 const DEEP_FILL = '#88888812'
@@ -75,6 +112,25 @@ const ANIMATION_MS = 400
 const PRESENT_TICK_MS = 1_000
 const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const CONNECTION_KEY = 'connection'
+
+// The "Check now" row's line: the last good check, in the person's own local
+// time, with a short day before it when that was not today. The saved schedule
+// knows only the last try: with none saved there has been no check yet, and
+// after a failed one the last good check is not known, so no time is shown.
+function checkedLine(lastAttemptAt: number | null, failures: number, now: number): string {
+  if (failures > 0) {
+    return SLOT_TEXT.lastCheckFailed
+  }
+
+  if (lastAttemptAt === null) {
+    return SLOT_TEXT.notCheckedYet
+  }
+
+  const date = new Date(lastAttemptAt)
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`
+
+  return date.toDateString() === new Date(now).toDateString() ? SLOT_TEXT.checkedAt(time) : SLOT_TEXT.checkedOn(`${date.getDate()} ${SHORT_MONTHS[date.getMonth()]}`, time)
+}
 
 // Forgotten when the session ends. Only `Saved` reaches the store.
 const waitTimer = createWaitTimer()
@@ -98,15 +154,21 @@ let lineOverride: { line: string | undefined } | null = null
 let undoTimer: { cancel: () => void } | undefined
 let openDocument: DocumentId | null = null
 let previewMeter: MeterId | undefined
+// The campaign whose drawer was last opened by default. Forgotten each time
+// the panel is opened, so a running campaign's drawer starts open.
+let campaignOpenedFor: string | null = null
 // Codes shown in full. Emptied when the panel closes; never kept.
 const revealedCodes = new Set<string>()
 
-// The two offline documents, and the two shown on the Connect card and while connected.
-type DocumentId = 'terms' | 'privacy' | 'connect-terms' | 'connect-privacy'
+// The two documents the one Connect press accepts (CONNECT_DOCUMENTS): the
+// Stage B Terms and Privacy Policy, opened from the card and from Settings.
+type DocumentId = 'terms' | 'privacy'
 type Surface = Parameters<EngineInterface['ui']['copy']>[0]['surface']
 type Deal = { prize: Prize; onCopy: (surface: Surface) => void }
 type Row = { id: string; node: any }
-type Drawer = { id: string; label: string; deals: Deal[]; rows?: Row[]; emptyText?: string }
+// `tile` and `emoji` replace the drawer's own icon (a campaign's look); `note`
+// is a built-in line at the top of the open drawer.
+type Drawer = { id: string; label: string; deals: Deal[]; rows?: Row[]; emptyText?: string; tile?: string; emoji?: string; note?: string }
 
 async function loadCatalog($: EngineInterface): Promise<Catalog> {
   catalog ??= parseCatalog(await $.fs.read(`${$.plugin.root}/offers.json`))
@@ -123,17 +185,12 @@ async function loadConsent($: EngineInterface): Promise<ConsentRecord> {
 }
 
 // The two documents travel with the add-on, so they open without a connection.
+// Each name is written out (CONNECT_DOCUMENTS), as the release check reads them.
 async function loadDocument($: EngineInterface, id: DocumentId): Promise<string> {
-  const text =
-    id === 'terms'
-      ? await $.fs.read(`${$.plugin.root}/TERMS.md`)
-      : id === 'privacy'
-        ? await $.fs.read(`${$.plugin.root}/PRIVACY.md`)
-        : id === 'connect-terms'
-          ? await $.fs.read(`${$.plugin.root}/TERMS-REHEARSAL.md`)
-          : await $.fs.read(`${$.plugin.root}/PRIVACY-REHEARSAL.md`)
+  const text = id === 'terms' ? await $.fs.read(`${$.plugin.root}/TERMS.md`) : await $.fs.read(`${$.plugin.root}/PRIVACY.md`)
 
-  return text.replace(/\r/g, '')
+  // The release check's markers in the documents are for the owner, not the reader.
+  return text.replace(/\r/g, '').replace(/ ?<!-- REHEARSAL-WORDING -->/g, '')
 }
 
 // The release's end date and trusted keys matter only once the Terms are
@@ -229,6 +286,7 @@ async function refreshStatus($: EngineInterface) {
   // Codes past their use-by date are deleted here, whatever else is on or off.
   const codes = await pruneCodes($, now)
   const connection = await loadConnection($)
+  await loadNoneLeft($)
 
   lineOverride = consentLine(view, consent, now)
   syncUndoTimer($, consent.deletePending || canUndo(connection, now))
@@ -250,41 +308,96 @@ async function refreshStatus($: EngineInterface) {
   // Once a signed list is in use, the offers and the pop-ups follow it. This
   // reads what is already in memory: a status refresh never uses the network.
   const served = serverView(connection, now)
-  const dealt = takePopups(noteMilestones(trackWindow(assignFirstMeter(before, defaultMeters, now), pickFiveHour(limits)), now, milestones), served.kind === 'local' && drops.length > 0 && isDropUnlocked(now))
-  const burned = takeBurnouts(dealt.saved, currentWindow(pickFiveHour(limits), now), currentWindow(pickWeekly(limits), now), now)
+  const live = served.kind === 'live' ? served.catalogue : undefined
+  // After Connect the practice prizes are gone: no pretend presents, Drop,
+  // rewards or limit prizes, and none of their gift marks or pop-ups. Only
+  // what the signed list holds is shown.
+  const linked = isConnected(connection)
+  const dealt = takePopups(noteMilestones(trackWindow(assignFirstMeter(before, defaultMeters, now), pickFiveHour(limits)), now, linked ? [] : milestones), !linked && drops.length > 0 && isDropUnlocked(now))
+  // A limit prize is waiting only when the signed list holds one this device
+  // can claim now. With none, or none left, nothing appears (slots design §3).
+  const isNoneLeft = (campaignId: string) => claimNote(campaignId, now) === 'none-left' || isNoneLeftRemembered(campaignId, now)
+  const hasPrize = (slot: LimitSlot) => live !== undefined && firstAvailable(limitPrizes(live, slot, codes, connection.firstSeenAt, now), isNoneLeft) !== undefined
+  const burned = takeBurnouts(dealt.saved, currentWindow(pickFiveHour(limits), now), currentWindow(pickWeekly(limits), now), now, linked ? { five: hasPrize('limit-5h'), week: hasPrize('limit-week') } : undefined)
   let updated = burned.saved
-  let popups = [...dealt.popups, ...burned.popups]
+  // Before Connect, the practice pop-ups as always.
+  const popups: string[] = linked ? [] : [...dealt.popups, ...burned.popups]
 
-  if (served.kind !== 'local') {
-    const rules = served.kind === 'live' ? served.catalogue.popupRules : []
+  if (linked) {
+    const rules = live?.popupRules ?? []
     const first = readPopups(await $.store.get(POPUPS_KEY), now)
-    let record = first
+    let record: PopupRecord = first
+    // The pop-ups due now, most important first. Each names the rule template
+    // that must allow it, and how it is remembered once shown.
+    const due: { line: string; template: string; remember: (r: PopupRecord) => PopupRecord }[] = []
 
-    // The signed list says how many pop-ups a day; the words are built in.
-    popups = burned.popups.filter(() => {
-      const taken = takePopup(record, rules, 'limit-lounge')
-      record = taken.record
-
-      return taken.isAllowed
-    })
-
-    if (served.kind === 'live') {
-      const opened = newlyOpen(record, served.catalogue, codes, connection.firstSeenAt, now)
+    if (live !== undefined) {
+      // Normal, daily and campaign offers only: never a limit prize or a present.
+      const opened = newlyOpen(record, live, codes, connection.firstSeenAt, now)
       record = opened.record
+      // A present that has just become ready raises a gift mark, and no pop-up.
+      const presents = newlyOpen(record, live, codes, connection.firstSeenAt, now, isPresent)
+      record = presents.record
 
-      if (opened.count > 0 && updated.meter !== null) {
-        const taken = takePopup(record, rules, 'daily-offer')
+      if (updated.meter !== null && opened.count + presents.count > 0) {
+        updated = { ...updated, marksPending: updated.marksPending + opened.count + presents.count }
+        record = opened.count > 0 ? { ...record, offerDue: true } : record
+      }
 
-        if (canPopUp(updated) && taken.isAllowed) {
-          record = taken.record
-          popups.push(OFFER_POPUP)
+      // 1. A limit prize really waiting, once per period.
+      for (const [slot, line] of [['limit-5h', BURN_FIVE_POPUP], ['limit-week', BURN_WEEK_POPUP]] as const) {
+        const key = limitPopupKey(slot, updated.date, updated.burnWeekUntil)
+        const state = { isEarned: slot === 'limit-5h' ? updated.burnFiveEarned : hasBurnWeek(updated, now), burnWeekUntil: updated.burnWeekUntil, firstSeenAt: connection.firstSeenAt, isNoneLeft }
+
+        if (!record.limits.includes(key) && limitPrize(live, slot, codes, state, now) !== undefined) {
+          due.push({ line, template: 'limit-lounge', remember: r => ({ ...r, limits: [...r.limits, key].slice(-10) }) })
         }
+      }
 
-        updated = { ...updated, marksPending: updated.marksPending + opened.count }
+      // 2. A campaign's start, once, with at least one of its offers open.
+      const event = eventToAnnounce(record, live, codes, connection.firstSeenAt, now)
+      const eventLine = event === undefined ? undefined : lookText(event.look)?.popup
+
+      if (event !== undefined && eventLine !== undefined) {
+        due.push({ line: eventLine, template: 'event-start', remember: r => noteEvent(r, event) })
+      }
+
+      // 3. "A new offer is open" (normal, daily and campaign offers), owed until shown today.
+      if (record.offerDue) {
+        due.push({ line: OFFER_POPUP, template: 'daily-offer', remember: r => ({ ...r, offerDue: false }) })
+      }
+
+      // 4. News, once for each list number that carries a news rule.
+      if (isNewsDue(record, live)) {
+        due.push({ line: NEWS_POPUP, template: 'news', remember: r => ({ ...r, newsSeq: live.seq }) })
       }
     }
 
-    if (record !== first) {
+    // 5. A newer version, once for each, remembered in the add-on's own record.
+    // No signed rule is needed: the list carries only the number.
+    const latest = signedLatestVersion(connection, now)
+
+    // At most one pop-up per refresh, the first the signed rules allow. The
+    // others wait for a later refresh: each is remembered only once shown.
+    // All need pop-ups on and a chosen meter.
+    if (canPopUp(updated) && updated.meter !== null) {
+      const shown = due.find(item => {
+        const taken = takePopup(record, rules, item.template)
+        record = taken.record
+
+        return taken.isAllowed
+      })
+
+      if (shown !== undefined) {
+        record = shown.remember(record)
+        popups.push(shown.line)
+      } else if (latest !== undefined && isUpdateDue(latest, ADDON_VERSION, updated.updateAnnounced)) {
+        popups.push(UPDATE_POPUP)
+        updated = { ...updated, updateAnnounced: latest }
+      }
+    }
+
+    if (JSON.stringify(record) !== JSON.stringify(first)) {
       await $.store.set(POPUPS_KEY, record)
     }
   }
@@ -306,10 +419,12 @@ async function refreshStatus($: EngineInterface) {
     meter: saved.meter,
     five: pickLimit(limits),
     gifts: saved.marksPending,
-    isGoodPace: saved.goodPaceNotice,
+    // The good-pace note belongs to a practice reward: none after Connect.
+    isGoodPace: !linked && saved.goodPaceNotice,
     waitedMinutes: saved.minutes,
     now,
-    present: presentProgress(saved, now, milestones, dailyPresent),
+    // After Connect the bar counts to the next present on the signed ladder, if any.
+    present: linked ? (live === undefined ? undefined : presentLadder(live, codes, connection.firstSeenAt, now).progress) : presentProgress(saved, now, milestones, dailyPresent),
     display: saved.meterDisplay,
   }
 
@@ -321,7 +436,7 @@ async function refreshStatus($: EngineInterface) {
     $.ui.invalidate('ui.render')
   }
 
-  isFirstWaitPending = saved.installedAt !== null && nextMilestone(saved, now, milestones) !== undefined
+  isFirstWaitPending = !linked && saved.installedAt !== null && nextMilestone(saved, now, milestones) !== undefined
   paintStatus($)
   syncAnimation($)
   syncPresentTimer($)
@@ -375,7 +490,11 @@ function redraw($: EngineInterface, change: () => void) {
 async function resetSaved($: EngineInterface) {
   // Deleting saved data also withdraws from the server, with no undo time.
   await disconnectNow($, true)
+  await forgetTextsChanged($)
   await $.store.delete(STORE_KEY)
+  // The highest offer-list number kept through a disconnect goes only here.
+  await $.store.delete(LIST_FLOOR_KEY)
+  await $.store.delete(NONE_LEFT_KEY)
   await refreshStatus($)
   isResetArmed = false
   isSettingsOpen = false
@@ -445,10 +564,10 @@ function DrawerRow($: EngineInterface, t: any, drawer: Drawer, hasDrawings: bool
   return (
     <Box key={`drawer-row-${drawer.id}`} flexDirection="column">
       <Box gap="sm" alignItems="center" paddingX="sm" paddingY="xs">
-        {hasDrawings && <Svg alt={drawer.label} width={28} height={28} source={iconTileSvg(drawer.id)} />}
+        {hasDrawings && <Svg alt={drawer.label} width={28} height={28} source={drawer.tile ?? iconTileSvg(drawer.id)} />}
         {/* A fixed share for the name, so every count lines up in one column. */}
         <Box width="40%">
-          <Button key={`drawer-${drawer.id}`} plain label={hasDrawings ? drawer.label : `${Object.hasOwn(DRAWER_ICONS, drawer.id) ? DRAWER_ICONS[drawer.id] : '🏷'} ${drawer.label}`} onPress={toggle} />
+          <Button key={`drawer-${drawer.id}`} plain label={hasDrawings ? drawer.label : `${drawer.emoji ?? (Object.hasOwn(DRAWER_ICONS, drawer.id) ? DRAWER_ICONS[drawer.id] : '🏷')} ${drawer.label}`} onPress={toggle} />
         </Box>
         <Box flexGrow={1} />
         <Text dimColor size="caption">{drawer.deals.length + rows.length}</Text>
@@ -456,6 +575,7 @@ function DrawerRow($: EngineInterface, t: any, drawer: Drawer, hasDrawings: bool
       </Box>
       {isOpen && (
         <Box flexDirection="column" backgroundColor={hasDrawings ? DEEP_FILL : undefined}>
+          {drawer.note !== undefined && <Box paddingX="sm" paddingY="xs"><Text dimColor size="caption">{drawer.note}</Text></Box>}
           {drawer.deals.length + rows.length === 0 && drawer.emptyText !== undefined && <Box paddingX="sm" paddingY="xs"><Text dimColor size="footnote">{drawer.emptyText}</Text></Box>}
           {rows.flatMap((row, index) => [...(index > 0 && hasDrawings ? [Hairline(t, 56, `row-line-${row.id}`)] : []), row.node])}
           {drawer.deals.flatMap((deal, index) => [
@@ -481,7 +601,7 @@ export const register: Register = on => {
     void networkTick($, true)
     await $.command.register({
       name: 'pauzza',
-      description: 'Open the Pauzza test prize menu',
+      description: 'Open Pauzza: offers and promo codes',
       immediate: true,
     })
 
@@ -492,8 +612,10 @@ export const register: Register = on => {
   // reach the transcript or the model.
   on('command.run', { command: 'pauzza' }, async $ => {
     isPaneOpen = true
-    // Each time the panel is opened, claimed codes start hidden.
+    // Each time the panel is opened, claimed codes start hidden, and a running
+    // campaign's drawer starts open.
     hidePaneSecrets()
+    campaignOpenedFor = null
     if (isRunning(viewOf(await loadConsent($), await $.clock.now()))) {
       await changeSaved($, s => (openDrawer === 'mine' ? clearMark(s) : s))
     }
@@ -527,7 +649,9 @@ export const register: Register = on => {
 
     if (finishedMs !== undefined) {
       const { rewards } = await loadCatalog($)
-      await changeSaved($, saved => addWait(saved, finishedMs, rewards))
+      // After Connect the minutes are still counted, but no practice reward is earned.
+      const isLinked = isConnected(await loadConnection($))
+      await changeSaved($, saved => (isLinked ? addWait(saved, finishedMs, [], false) : addWait(saved, finishedMs, rewards)))
     }
 
     return next(e)
@@ -557,11 +681,16 @@ export const register: Register = on => {
     const connection = await loadConnection($)
     const codes = await loadCodes($, now)
     const linked = isConnected(connection)
+    // Connected by a newer Pauzza in another window, under texts this version
+    // does not know: not connected here, and no Connect card; the update line
+    // says to reload. Switching off still disconnects it.
+    const isNewerPress = isFromNewerAddon(connection)
+    const holdsInstall = linked || isNewerPress
 
     if (openDocument !== null) {
-      const file: DocumentFile | undefined = openDocument === 'terms' ? 'TERMS.md' : openDocument === 'privacy' ? 'PRIVACY.md' : undefined
-      const online = hasPublicRepo && file !== undefined ? officialLink(documentUrl(file)) : undefined
-      const title = openDocument === 'terms' ? CONSENT_TEXT.terms : openDocument === 'privacy' ? CONSENT_TEXT.privacy : openDocument === 'connect-terms' ? CONNECT_TEXT.terms : CONNECT_TEXT.privacy
+      const file: DocumentFile = openDocument === 'terms' ? CONNECT_DOCUMENTS.terms : CONNECT_DOCUMENTS.privacy
+      const online = hasPublicRepo ? officialLink(documentUrl(file)) : undefined
+      const title = openDocument === 'terms' ? CONNECT_TEXT.terms : CONNECT_TEXT.privacy
 
       return (
         <Box flexDirection="column" gap="sm">
@@ -582,7 +711,13 @@ export const register: Register = on => {
     const isFirstTime = saved.meter === null
     const showCarousel = isFirstTime || isPickerOpen
     const chosen = showCarousel ? null : saved.meter
-    const present = isLounge ? undefined : presentProgress(saved, now, data.milestones, data.dailyPresent)
+    // What came from the server. Everything here was checked on arrival and is
+    // read from memory or the saved record: drawing never uses the network.
+    const served = running ? serverView(connection, now) : ({ kind: 'local' } as const)
+    const live = served.kind === 'live' ? served.catalogue : undefined
+    const ladder = live === undefined ? undefined : presentLadder(live, codes, connection.firstSeenAt, now)
+    // After Connect the bar follows the signed presents only; with none, there is no bar.
+    const present = isLounge ? undefined : linked ? ladder?.progress : presentProgress(saved, now, data.milestones, data.dailyPresent)
     const chosenPercent = isLounge ? 100 : (present?.percent ?? five?.percent)
     const chosenNote =
       present !== undefined
@@ -619,11 +754,15 @@ export const register: Register = on => {
       saved.burnFiveEarned ? data.burnFive : undefined,
       hasBurnWeek(saved, now) ? data.burnWeek : undefined,
     ].flatMap(prize => (prize === undefined ? [] : [plainDeal(prize)]))
-    const mine = [
-      ...[...presents].reverse().map(item => plainDeal(item)),
-      ...readyRewards(minutes, data.rewards).map(reward => plainDeal(reward, s => claimReward(s, reward.id))),
-      ...extras,
-    ]
+    // The practice prizes, before Connect only. After it, Mine holds what the
+    // signed list gives and the codes received.
+    const mine = linked
+      ? []
+      : [
+          ...[...presents].reverse().map(item => plainDeal(item)),
+          ...readyRewards(minutes, data.rewards).map(reward => plainDeal(reward, s => claimReward(s, reward.id))),
+          ...extras,
+        ]
     const drop = dropOfDay(data.drops, now)
     const dayDeals: Deal[] =
       drop !== undefined && isDropUnlocked(now)
@@ -632,10 +771,8 @@ export const register: Register = on => {
     const offers = sortOffers(data.offers, [], saved.recent, isLounge)
     const card = hasDrawings ? { borderStyle: 'round', borderColor: CARD_FILL, backgroundColor: CARD_FILL } : { borderStyle: 'round', borderDimColor: true }
 
-    // What came from the server. Everything here was checked on arrival and is
-    // read from memory or the saved record: drawing never uses the network.
-    const served = running ? serverView(connection, now) : ({ kind: 'local' } as const)
     const isOffline = running && linked && (await isUnreachable($))
+    const tryNote = currentTryNote()
     const useByText = (ms: number) => {
       const date = new Date(ms)
 
@@ -664,10 +801,12 @@ export const register: Register = on => {
       }
     }
     // An offer with no code yet. One press on "Get code" asks the server once.
-    const offerRow = (offer: ServerOffer, catalogue: Catalogue, isOpen: boolean): Row => {
+    // `title` and `note` are built-in lines above and below the offer, such as
+    // a limit prize's name and what pressing tells Pauzza.
+    const offerRow = (offer: ServerOffer, catalogue: Catalogue, isOpen: boolean, extra: { title?: string; note?: string; hasNoLink?: boolean } = {}): Row => {
       const note = claimNote(offer.campaign.id, now)
-      const host = offer.link === undefined ? undefined : checkLink(offer.link, catalogue.allowedLinkHosts)
-      const href = host === undefined ? undefined : offerLink(offer.id)
+      // The signed address itself, checked again against this verified list's own hosts, labelled with its host.
+      const link = offer.link === undefined || extra.hasNoLink === true ? undefined : offerLink(offer.link, catalogue.allowedLinkHosts)
       const getCode = async () => {
         const got = await claimOffer($, offer)
 
@@ -680,7 +819,10 @@ export const register: Register = on => {
         $.ui.invalidate('ui.render')
       }
       const quiet = note === 'getting' ? CONNECT_TEXT.gettingCode : note === 'none-left' ? CONNECT_TEXT.noneLeft : note === 'unavailable' || !isOpen ? CONNECT_TEXT.unavailable : undefined
-      const isDim = quiet !== undefined && note !== 'getting'
+      // "None left" answered earlier (up to NONE_LEFT_MS, this list only): the row stays
+      // dimmed and says so without another press, and the button stays to try again.
+      const isRememberedNoneLeft = quiet === undefined && isNoneLeftRemembered(offer.campaign.id, now)
+      const isDim = (quiet !== undefined && note !== 'getting') || isRememberedNoneLeft
 
       return {
         id: `offer-${offer.id}`,
@@ -688,52 +830,109 @@ export const register: Register = on => {
           <Box key={`offer-${offer.id}`} gap="sm" alignItems="center" paddingX="sm" paddingY="xs" flexWrap="wrap">
             {hasDrawings && <Svg alt={offer.brand} width={34} height={34} source={logoTileSvg(offer.brand)} />}
             <Box flexDirection="column" flexGrow={1} minWidth={0}>
+              {extra.title !== undefined && <Text dimColor size="caption">{extra.title}</Text>}
               <Text weight="semibold" size="footnote" dimColor={isDim}>{offer.brand}</Text>
               <Text weight="medium" size="caption" dimColor={isDim}>{offer.text}</Text>
-              {href !== undefined && host !== undefined && Link !== undefined && <Link key={`link-${offer.id}`} href={href} label={host} />}
+              {link !== undefined && Link !== undefined && <Link key={`link-${offer.id}`} href={link.href} label={link.host} />}
+              {extra.note !== undefined && <Text dimColor size="caption">{extra.note}</Text>}
             </Box>
             <Text mono dimColor size="caption">{CONNECT_TEXT.hiddenCode}</Text>
             {quiet === undefined && note === 'offline' && <Text dimColor size="caption">{CONNECT_TEXT.claimOffline}</Text>}
+            {isRememberedNoneLeft && note !== 'offline' && <Text dimColor size="caption">{CONNECT_TEXT.noneLeft}</Text>}
             {quiet !== undefined ? <Text dimColor size="caption">{quiet}</Text> : <Button key={`claim-${offer.id}`} label={CONNECT_TEXT.getCode} onPress={getCode} />}
           </Box>
         ),
       }
     }
+    // An offer as its drawer shows it: the code if one is held, nothing once it has ended.
+    const servedRow = (offer: ServerOffer, catalogue: Catalogue): Row[] => {
+      const state = offerState(offer, codes, connection.firstSeenAt, now)
+      const held = codes.find(item => item.campaignId === offer.campaign.id)
+
+      return state === 'ended' ? [] : held !== undefined ? [codeRow(held)] : [offerRow(offer, catalogue, state === 'open')]
+    }
+    // The campaign running now, in its own highlighted drawer at the top. Its
+    // offers leave their categories while it runs.
+    const campaign = live === undefined ? undefined : runningEvent(live, now)
+
+    if (campaign !== undefined && campaignOpenedFor !== campaign.id) {
+      campaignOpenedFor = campaign.id
+      openDrawer = 'campaign'
+    }
+
+    const campaignDrawer: Drawer | undefined =
+      live === undefined || campaign === undefined
+        ? undefined
+        : {
+            id: 'campaign',
+            label: SLOT_TEXT.campaignUntil(campaign.name, campaignLastDay(campaign)),
+            deals: [],
+            // Codes already claimed stay under Mine; ended offers go.
+            rows: campaignOffers(live, campaign).flatMap(offer => {
+              const state = offerState(offer, codes, connection.firstSeenAt, now)
+
+              return state === 'ended' || state === 'claimed' ? [] : [offerRow(offer, live, state === 'open')]
+            }),
+            emptyText: SLOT_TEXT.campaignSeenAll(campaign.name),
+            tile: lookTileSvg(campaign.look),
+            emoji: lookText(campaign.look)?.emoji,
+          }
     const servedDrawers: Drawer[] =
-      served.kind !== 'live'
+      live === undefined
         ? []
-        : served.catalogue.categories
+        : live.categories
             .map(category => ({
               id: category.id,
               label: category.label,
               deals: [],
-              rows: served.catalogue.offers
-                .filter(offer => offer.category === category.id)
-                .flatMap(offer => {
-                  const state = offerState(offer, codes, connection.firstSeenAt, now)
-                  const held = codes.find(item => item.campaignId === offer.campaign.id)
-
-                  return state === 'ended' ? [] : held !== undefined ? [codeRow(held)] : [offerRow(offer, served.catalogue, state === 'open')]
-                }),
+              rows: live.offers.filter(offer => offer.category === category.id && isInCategory(offer, campaign)).flatMap(offer => servedRow(offer, live)),
             }))
             .filter(drawer => drawer.rows.length > 0)
-    const mineDrawer: Drawer = { id: 'mine', label: 'Mine', deals: mine, rows: codes.map(codeRow), emptyText: 'Your presents show up here' }
-    const drawers: Drawer[] =
-      served.kind !== 'local'
-        ? [mineDrawer, ...servedDrawers]
+    // The daily offer: today's from its opening time, the earlier one while it
+    // is still open, "Opens at 12:00" before today's opens, else no drawer.
+    const daily = live === undefined ? undefined : dailyOffer(live, now)
+    const dailyTime = live?.schedule.dailyOfferOpens ?? ''
+    const dayDrawer: Drawer | undefined =
+      live === undefined || daily === undefined
+        ? undefined
+        : { id: 'day', label: SLOT_TEXT.dailyDrawer, deals: [], rows: daily.kind === 'offer' ? servedRow(daily.offer, live) : [], emptyText: SLOT_TEXT.dailyOpensAt(dailyTime), note: SLOT_TEXT.dailyNote(dailyTime) }
+    // A limit prize, under Mine, once this device has seen that limit at 100%
+    // and until it claims one for that period: the first offer still available.
+    // No shop link on a limit prize: the link is the prize's own address, so
+    // opening it would tell the shop that a limit was reached, without the
+    // line that "Get code" shows first.
+    const prizeRows = (slot: LimitSlot, isEarned: boolean, title: string, note: string): Row[] => {
+      const offer = live === undefined ? undefined : limitPrize(live, slot, codes, { isEarned, burnWeekUntil: saved.burnWeekUntil, firstSeenAt: connection.firstSeenAt, isNoneLeft: campaignId => claimNote(campaignId, now) === 'none-left' || isNoneLeftRemembered(campaignId, now) }, now)
+
+      return live === undefined || offer === undefined ? [] : [offerRow(offer, live, true, { title, note, hasNoLink: true })]
+    }
+    const slotRows: Row[] =
+      live === undefined
+        ? []
         : [
-            mineDrawer,
-            { id: 'day', label: 'Daily Drop', deals: dayDeals, emptyText: 'Opens at 12:00' },
-            ...data.categories.map(category => ({
-              id: category.id,
-              label: category.label,
-              deals: offers
-                .filter(offer => offer.category === category.id)
-                .map(offer => ({ prize: offer, onCopy: (s: Surface) => copyCode($, offer.code, s, x => noteCopied(x, offer.id)) })),
-            })),
+            ...prizeRows('limit-5h', saved.burnFiveEarned, SLOT_TEXT.fivePrize, SLOT_TEXT.fiveNote),
+            ...prizeRows('limit-week', hasBurnWeek(saved, now), SLOT_TEXT.weekPrize, SLOT_TEXT.weekNote),
+            ...(ladder?.ready ?? []).map(offer => offerRow(offer, live, true, { title: SLOT_TEXT.present })),
           ]
-    const hasNoOffers = served.kind !== 'local' && servedDrawers.length === 0
-    const hasUnclaimed = servedDrawers.some(drawer => (drawer.rows ?? []).some(row => row.id.startsWith('offer-')))
+    const mineDrawer: Drawer = { id: 'mine', label: 'Mine', deals: mine, rows: [...slotRows, ...codes.map(codeRow)], emptyText: 'Your presents show up here' }
+    const drawers: Drawer[] = linked
+      ? [mineDrawer, ...(dayDrawer === undefined ? [] : [dayDrawer]), ...servedDrawers]
+      : [
+          mineDrawer,
+          { id: 'day', label: 'Daily Drop', deals: dayDeals, emptyText: 'Opens at 12:00' },
+          ...data.categories.map(category => ({
+            id: category.id,
+            label: category.label,
+            deals: offers
+              .filter(offer => offer.category === category.id)
+              .map(offer => ({ prize: offer, onCopy: (s: Surface) => copyCode($, offer.code, s, x => noteCopied(x, offer.id)) })),
+          })),
+        ]
+    // After Connect, with no signed list or nothing in it to show: the calm note.
+    const hasNoOffers = linked && servedDrawers.length === 0 && dayDrawer === undefined && campaignDrawer === undefined && slotRows.length === 0
+    const hasUnclaimed = [...drawers, ...(campaignDrawer === undefined ? [] : [campaignDrawer])].some(drawer => (drawer.rows ?? []).some(row => row.id.startsWith('offer-')))
+    // The signed list names a newer add-on: a built-in line under the drawers.
+    const hasUpdate = (linked && isNewer(signedLatestVersion(connection, now), ADDON_VERSION)) || isNewerPress
     const afterConnection = async () => {
       await refreshStatus($)
       $.ui.invalidate('ui.render')
@@ -750,45 +949,92 @@ export const register: Register = on => {
         <Text dimColor size="caption">{CONNECT_TEXT.deletingIn(connectionUndoSecondsLeft(connection, now))}</Text>
       </Box>
     )
+    // Saves the acceptance of the current texts, the first half of the one press.
+    // A disconnect still inside its undo time is undone too, as nothing was sent yet.
     const acceptNow = async () => {
-      // Undoing "Pauzza is on" also undoes the disconnect it caused, if nothing was sent yet.
       await undoDisconnectNow($)
       await $.store.set(STORE_KEY, assignFirstMeter(await loadSaved($), previewMeter === undefined ? [] : [previewMeter], await $.clock.now()))
       await changeConsent($, (record, at) => accept(record, at))
     }
+    // THE ONE PRESS (owner, 2026-11-19): it accepts the Terms and Privacy
+    // Policy, confirms 18 or older, and connects. The acceptance is saved first,
+    // so it stands if the connection then fails. Nothing runs or is sent before it.
+    // Already accepted (a retry after a failed connection, or the card after a
+    // change of the Connect texts): the saved acceptance is left as it is.
+    const acceptAndConnect = async () => {
+      if (viewOf(await loadConsent($), await $.clock.now()) !== 'active') {
+        await acceptNow()
+      }
+
+      await connectNow($)
+      await afterConnection()
+    }
+    // The Undo of "Pauzza is on": it brings back exactly what was switched off
+    // (undoWithdraw), and the connection if nothing was sent yet. Never an
+    // acceptance of the current texts, which only the Connect press gives.
+    const undoStop = async () => {
+      await undoDisconnectNow($)
+      await changeConsent($, (record, at) => undoWithdraw(record, at))
+    }
+    const connectNote = currentConnectNote()
+    const isConnecting = connectNote === 'connecting'
+    // Settings: the two documents the press accepted.
     const documentLinks = (
       <Box gap="xs" alignItems="center" flexWrap="wrap">
-        <Button key="open-terms" plain label={CONSENT_TEXT.terms} onPress={() => showDocument(linked ? 'connect-terms' : 'terms')} />
+        <Button key="open-terms" plain label={CONSENT_TEXT.terms} onPress={() => showDocument('terms')} />
         <Text dimColor size="caption">·</Text>
-        <Button key="open-privacy" plain label={CONSENT_TEXT.privacy} onPress={() => showDocument(linked ? 'connect-privacy' : 'privacy')} />
+        <Button key="open-privacy" plain label={CONSENT_TEXT.privacy} onPress={() => showDocument('privacy')} />
       </Box>
     )
-    const tickRow = (label: string, onLater: (() => unknown) | undefined) => (
-      <Box justifyContent="space-between" alignItems="center" gap="sm" flexWrap="wrap">
-        <Button key="consent-tick" variant="primary" label={label} onPress={acceptNow} />
-        {onLater !== undefined && <Button key="consent-later" plain label={CONSENT_TEXT.later} onPress={onLater} />}
-      </Box>
-    )
-    const smallPrint = (
+    // The Connect card's words (legal), wherever the one press is offered: what
+    // happens, the usage-figures line, the button, and the acceptance line under it.
+    const connectWords = (
       <Box flexDirection="column">
-        <Text dimColor size="caption">{CONSENT_TEXT.age}</Text>
-        <Box gap="xs" alignItems="center" flexWrap="wrap">
-          {documentLinks}
-          <Text dimColor size="caption">· {CONSENT_TEXT.cancelIn}</Text>
-        </Box>
+        <Text dimColor size="caption">{CONNECT_TEXT.what}</Text>
+        <Text dimColor size="caption">{CONNECT_TEXT.figures}</Text>
       </Box>
     )
+    // The button, never chosen in advance (no focus, no hotkey), and "Not now" beside it where offered.
+    const connectRow = (onLater: (() => unknown) | undefined) =>
+      isConnecting ? (
+        <Text dimColor>{CONNECT_TEXT.connecting}</Text>
+      ) : (
+        <Box justifyContent="space-between" alignItems="center" gap="sm" flexWrap="wrap">
+          <Button key="connect-press" variant="primary" label={CONNECT_TEXT.connect} onPress={acceptAndConnect} />
+          {onLater !== undefined && <Button key="consent-later" plain label={CONSENT_TEXT.later} onPress={onLater} />}
+        </Box>
+      )
+    // "By connecting you accept the [Terms] and [Privacy Policy] and confirm you
+    // are 18 or older.", in the pieces the panel draws: the two names open the documents.
+    const acceptLine = (
+      <Box gap="xs" alignItems="center" flexWrap="wrap">
+        <Text dimColor size="caption">{CONNECT_TEXT.acceptStart}</Text>
+        <Button key="connect-terms" plain label={CONNECT_TEXT.terms} onPress={() => showDocument('terms')} />
+        <Text dimColor size="caption">{CONNECT_TEXT.acceptMiddle}</Text>
+        <Button key="connect-privacy" plain label={CONNECT_TEXT.privacy} onPress={() => showDocument('privacy')} />
+        <Text dimColor size="caption">{CONNECT_TEXT.acceptEnd}</Text>
+      </Box>
+    )
+    // Changed Terms (a new TERMS_VERSION): the same one press asks again.
     const updateBlock = (
       <Box flexDirection="column" gap="xs">
         <Text weight="semibold" size="footnote">{CONSENT_TEXT.updated}</Text>
         {TERMS_CHANGE_NOTE !== '' && <Text dimColor size="caption">{TERMS_CHANGE_NOTE}</Text>}
-        {tickRow(CONSENT_TEXT.updateTick, consent.dismissedTermsVersion === null ? () => changeConsent($, record => dismissUpdate(record)) : undefined)}
-        {smallPrint}
+        {connectWords}
+        {connectRow(consent.dismissedTermsVersion === null ? () => changeConsent($, record => dismissUpdate(record)) : undefined)}
+        {acceptLine}
       </Box>
     )
 
     if (isSettingsOpen && saved.meter !== null && (running || consent.deletePending || consentView === 'update-required')) {
       const chooserFill = hasDrawings ? { borderStyle: 'round', borderColor: CARD_FILL, backgroundColor: CARD_FILL } : {}
+      // "Check now": only while connected here, with the Terms accepted and the
+      // test still running. Reads the saved schedule; drawing sends nothing.
+      const canCheck = running && linked && !isTestOver(now)
+      const schedule = canCheck ? readFetchState(await $.store.get(FETCH_KEY)) : undefined
+      const checkNote = currentCheckNote()
+      const checkNoteText =
+        checkNote === 'same' ? SLOT_TEXT.checkSame : checkNote === 'new' ? SLOT_TEXT.checkNew : checkNote === 'wait' ? SLOT_TEXT.checkWait : checkNote === 'failed' ? SLOT_TEXT.tryFailed : undefined
       const tile = (id: string, label: string) => hasDrawings && <Svg alt={label} width={28} height={28} source={iconTileSvg(id)} />
       const choiceBar = (keyPrefix: string, choices: ReadonlyArray<{ id: string; label: string; isOn: boolean; onPress: () => unknown }>, shouldFill: boolean) => (
         <Box gap="xs" paddingX="xs" flexWrap="wrap" minWidth={0} flexGrow={shouldFill ? 1 : undefined} {...chooserFill}>
@@ -835,6 +1081,34 @@ export const register: Register = on => {
           </Box>
 
           <Box flexDirection="column" paddingY="xs" {...card}>
+            {/* Keeping things current: the offers, then the add-on itself. */}
+            {schedule !== undefined && (
+              <Box gap="sm" alignItems="center" paddingX="sm" paddingY="xs">
+                {tile('check', 'offers')}
+                <Box flexDirection="column" flexGrow={1} minWidth={0}>
+                  <Text weight="medium">{checkedLine(schedule.lastAttemptAt, schedule.failures, now)}</Text>
+                  {checkNoteText !== undefined && <Text dimColor size="caption">{checkNoteText}</Text>}
+                </Box>
+                {checkNote === 'checking' ? (
+                  <Text dimColor size="caption">{SLOT_TEXT.checking}</Text>
+                ) : (
+                  <Button key="check-now" label={SLOT_TEXT.checkNow} onPress={() => tryNow($, 'check')} />
+                )}
+              </Box>
+            )}
+            {schedule !== undefined && hasDrawings && Hairline(t, 52, 'settings-line-check')}
+            <Box gap="sm" alignItems="center" paddingX="sm" paddingY="xs">
+              {tile('update', SLOT_TEXT.autoUpdateTitle)}
+              <Text weight="medium">{SLOT_TEXT.autoUpdateTitle}</Text>
+            </Box>
+            {/* Words only, never a switch: Pauzza cannot turn the tool's auto-update on, and never writes its settings. */}
+            <Box flexDirection="column" paddingX="sm" paddingBottom="xs">
+              <Text dimColor size="caption">{SLOT_TEXT.autoUpdateHow}</Text>
+              <Text dimColor size="caption">{SLOT_TEXT.autoUpdateOnlyYou}</Text>
+            </Box>
+          </Box>
+
+          <Box flexDirection="column" paddingY="xs" {...card}>
             <Box gap="sm" alignItems="center" paddingX="sm" paddingY="xs">
               {tile('line', 'acceptance')}
               {consent.deletePending ? (
@@ -846,13 +1120,13 @@ export const register: Register = on => {
                 <Box flexDirection="column" flexGrow={1} minWidth={0}>
                   <Button key="consent-untick" plain label={CONSENT_TEXT.settingOn} onPress={async () => { await disconnectNow($); await changeConsent($, (record, at) => withdraw(record, at)) }} />
                   <Text dimColor size="caption">{CONSENT_TEXT.settingWarn}</Text>
-                  {linked && <Text dimColor size="caption">{CONNECT_TEXT.alsoDisconnects}</Text>}
+                  {holdsInstall && <Text dimColor size="caption">{CONNECT_TEXT.alsoDisconnects}</Text>}
                   {documentLinks}
-                  {linked && connection.publicRef !== null && <Text dimColor size="caption">{CONNECT_TEXT.reference} · {connection.publicRef}</Text>}
-                  {linked && connection.publicRef !== null && <Text dimColor size="caption">{CONNECT_TEXT.referenceNote}</Text>}
+                  {holdsInstall && connection.publicRef !== null && <Text dimColor size="caption">{CONNECT_TEXT.reference} · {connection.publicRef}</Text>}
+                  {holdsInstall && connection.publicRef !== null && <Text dimColor size="caption">{CONNECT_TEXT.referenceNote}</Text>}
                 </Box>
               )}
-              {consent.deletePending && <Button key="consent-undo" label={CONSENT_TEXT.undo} onPress={acceptNow} />}
+              {consent.deletePending && <Button key="consent-undo" label={CONSENT_TEXT.undo} onPress={undoStop} />}
             </Box>
             {hasDrawings && Hairline(t, 52, 'settings-line-consent')}
             <Box gap="sm" alignItems="center" paddingX="sm" paddingY="xs">
@@ -864,17 +1138,22 @@ export const register: Register = on => {
               {isResetArmed && <Button key="reset-cancel" label="No" onPress={() => redraw($, () => { isResetArmed = false })} />}
               {isResetArmed && <Button key="reset-confirm" onPress={() => resetSaved($)}><Text color="error">Yes, delete</Text></Button>}
             </Box>
-            {linked && <Box paddingX="sm" paddingBottom="xs"><Text dimColor size="caption">{CONNECT_TEXT.alsoDisconnects}</Text></Box>}
+            {holdsInstall && <Box paddingX="sm" paddingBottom="xs"><Text dimColor size="caption">{CONNECT_TEXT.alsoDisconnects}</Text></Box>}
+            {/* Support, last in Settings (owner, 2026-11-19). */}
+            {hasDrawings && Hairline(t, 52, 'settings-line-support')}
+            <Box paddingX="sm" paddingY="xs"><Text dimColor size="caption">{CONNECT_TEXT.support}</Text></Box>
           </Box>
         </Box>
       )
     }
 
+    // The first screen, and the screen while stopped, declined or paused for
+    // changed Terms: the one press, and nothing that runs before it.
     if (!running) {
       previewMeter ??= saved.meter ?? data.defaultMeters[now % Math.max(data.defaultMeters.length, 1)]
       const shownMeter = METERS.find(meter => meter.id === previewMeter)
       const isUpdate = consentView === 'update-required'
-      const note = consentView === 'declined' ? CONSENT_TEXT.declined : consentView === 'withdrawn' ? CONSENT_TEXT.stopped : CONSENT_TEXT.what
+      const note = consentView === 'declined' ? CONSENT_TEXT.declined : consentView === 'withdrawn' ? CONSENT_TEXT.stopped : undefined
       const quietRows = [{ id: 'mine', label: 'Mine' }, { id: 'day', label: 'Daily Drop' }, ...data.categories]
 
       return (
@@ -882,15 +1161,16 @@ export const register: Register = on => {
           <Box flexDirection="column" gap="xs" paddingX="md" paddingY="sm" {...card}>
             <Box justifyContent="space-between" alignItems="center" gap="sm">
               {shownMeter !== undefined && <Text weight="semibold">{shownMeter.name}</Text>}
-              {isUpdate && <Button key="settings-toggle" plain dimColor label="⚙" onPress={() => redraw($, () => { isSettingsOpen = true; isResetArmed = false })} />}
+              {isUpdate && <Button key="settings-toggle" plain dimColor label="⚙" onPress={() => redraw($, () => { isSettingsOpen = true; isResetArmed = false; clearCheckNote() })} />}
             </Box>
             {shownMeter !== undefined && MeterPicture(t, shownMeter.id, 0, hasDrawings)}
             {isUpdate ? updateBlock : (
               <Box flexDirection="column" gap="xs">
-                <Text dimColor size="caption">{note}</Text>
+                {note !== undefined && <Text dimColor size="caption">{note}</Text>}
+                {connectWords}
                 {hasDrawings && Hairline(t, 1, 'consent-line')}
-                {tickRow(CONSENT_TEXT.tick, consentView === 'ask' ? () => changeConsent($, (record, at) => decline(record, at)) : undefined)}
-                {smallPrint}
+                {connectRow(consentView === 'ask' ? () => changeConsent($, (record, at) => decline(record, at)) : undefined)}
+                {acceptLine}
               </Box>
             )}
           </Box>
@@ -913,13 +1193,21 @@ export const register: Register = on => {
       )
     }
 
-    // The Connect step. Shown only after the Terms are accepted, and never
-    // while the wording is unfinished or the test is over.
-    const connectNote = currentConnectNote()
-    const isConnecting = connectNote === 'connecting'
+    // The Connect card, while accepted but not connected: after a connection
+    // that failed, "Delete saved data", a change of the accepted texts or the
+    // 12-month forget. Its press is the same one press. Never while the
+    // release's end date is unusable or the test is over, and not under the
+    // "Terms updated" notice, which already holds the one button.
     const mayConnect = canOfferConnect(now)
-    const showConnectCard = !linked && mayConnect && !isUndoable
-    const disconnectLine = currentDisconnectNote() === 'done' ? CONNECT_TEXT.disconnectedDone : connection.withdrawal !== null && !isUndoable ? CONNECT_TEXT.disconnectedQueued : undefined
+    const showConnectCard = !linked && !isNewerPress && mayConnect && !isUndoable && consentView !== 'update-notice'
+    // Back because the accepted texts changed: the card says so in its own
+    // line, and the "Disconnected…" lines, about a press the person never
+    // made, stay away (under the "Terms updated" notice too).
+    const isTextsChange = !linked && connection.textsChanged
+    // After this version's test date the "Disconnected… codes stay" lines are left out: the test's own
+    // codes were just deleted.
+    const isTestEnded = isTestOver(now)
+    const disconnectLine = isTextsChange || isTestEnded ? undefined : currentDisconnectNote() === 'done' ? CONNECT_TEXT.disconnectedDone : connection.withdrawal !== null && !isUndoable ? CONNECT_TEXT.disconnectedQueued : undefined
     const connectArea = linked ? (
       connectNote === 'connected' && (
         <Box flexDirection="column" gap="xs" paddingX="md" paddingY="sm" {...card}>
@@ -940,24 +1228,13 @@ export const register: Register = on => {
           </Box>
         )}
         {showConnectCard && connectNote === 'failed' && <Text dimColor size="caption">{CONNECT_TEXT.connectFailed}</Text>}
-        {/* The same light weight as the acceptance step: one sentence, one button, one line. */}
+        {/* The same card as the first screen, without "Not now": closing the panel is enough. */}
         {showConnectCard && (
           <Box flexDirection="column" gap="xs" paddingX="md" paddingY="sm" {...card}>
-            <Text dimColor size="caption">{CONNECT_TEXT.what}</Text>
-            {isConnecting ? (
-              <Text dimColor>{CONNECT_TEXT.connecting}</Text>
-            ) : (
-              <Box alignItems="center" gap="sm" flexWrap="wrap">
-                <Button key="connect-press" variant="primary" label={CONNECT_TEXT.connect} onPress={async () => { await connectNow($); await afterConnection() }} />
-              </Box>
-            )}
-            <Box gap="xs" alignItems="center" flexWrap="wrap">
-              <Text dimColor size="caption">{CONNECT_TEXT.acceptStart}</Text>
-              <Button key="connect-terms" plain label={CONNECT_TEXT.terms} onPress={() => showDocument('connect-terms')} />
-              <Text dimColor size="caption">{CONNECT_TEXT.acceptMiddle}</Text>
-              <Button key="connect-privacy" plain label={CONNECT_TEXT.privacy} onPress={() => showDocument('connect-privacy')} />
-              <Text dimColor size="caption">{CONNECT_TEXT.acceptEnd}</Text>
-            </Box>
+            {isTextsChange && <Text size="caption">{CONNECT_TEXT.textsChanged}</Text>}
+            {connectWords}
+            {connectRow(undefined)}
+            {acceptLine}
           </Box>
         )}
       </Box>
@@ -966,7 +1243,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap="sm">
         {consentView === 'update-notice' && <Box paddingX="md" paddingY="sm" {...card}>{updateBlock}</Box>}
-        {isLounge && <Text bold color="warning">🛋 Limit Lounge: best offers first</Text>}
+        {isLounge && !linked && <Text bold color="warning">🛋 Limit Lounge: best offers first</Text>}
 
         {showCarousel && (
           <Box flexDirection="column" gap="sm" alignItems="center" paddingX="md" paddingY="sm" {...card}>
@@ -999,7 +1276,7 @@ export const register: Register = on => {
               <Text weight="semibold">{METERS.find(meter => meter.id === chosen)?.name}</Text>
               <Box gap="md" alignItems="center">
                 <Button key="meter-change" plain dimColor label="Change" onPress={() => redraw($, () => { isPickerOpen = true })} />
-                <Button key="settings-toggle" plain dimColor label="⚙" onPress={() => redraw($, () => { isSettingsOpen = true; isResetArmed = false })} />
+                <Button key="settings-toggle" plain dimColor label="⚙" onPress={() => redraw($, () => { isSettingsOpen = true; isResetArmed = false; clearCheckNote() })} />
               </Box>
             </Box>
             {MeterPicture(t, chosen, chosenPercent ?? 0, hasDrawings)}
@@ -1012,13 +1289,32 @@ export const register: Register = on => {
 
         {connectArea}
 
-        {isOffline && <Text dimColor size="caption">{served.kind === 'local' ? CONNECT_TEXT.offlineSamples : CONNECT_TEXT.offlineList}</Text>}
-        <Text dimColor size="caption">{served.kind === 'local' ? CONSENT_TEXT.samples : CONNECT_TEXT.testCodes}</Text>
+        {isOffline && (
+          <Box flexDirection="column" gap="xs">
+            <Text dimColor size="caption">{served.kind === 'local' ? SLOT_TEXT.offlineNoList : CONNECT_TEXT.offlineList}</Text>
+            <Box gap="sm" alignItems="center" flexWrap="wrap">
+              {tryNote === 'trying' ? (
+                <Text dimColor size="caption">{SLOT_TEXT.trying}</Text>
+              ) : (
+                <Button key="try-now" label={SLOT_TEXT.tryNow} onPress={() => tryNow($)} />
+              )}
+              {tryNote === 'wait' && <Text dimColor size="caption">{SLOT_TEXT.tryWait}</Text>}
+              {tryNote === 'failed' && <Text dimColor size="caption">{SLOT_TEXT.tryFailed}</Text>}
+            </Box>
+          </Box>
+        )}
+        <Text dimColor size="caption">{linked ? CONNECT_TEXT.offersLabel : CONSENT_TEXT.samples}</Text>
         {hasUnclaimed && <Text dimColor size="caption">{CONNECT_TEXT.getCodeNote}</Text>}
         {hasNoOffers && (
           <Box flexDirection="column">
             <Text size="footnote">{CONNECT_TEXT.noOffers}</Text>
             <Text dimColor size="caption">{CONNECT_TEXT.noOffersNote}</Text>
+          </Box>
+        )}
+
+        {campaignDrawer !== undefined && campaign !== undefined && (
+          <Box flexDirection="column" borderStyle="round" borderColor={lookColour(campaign.look)} backgroundColor={hasDrawings ? `${lookColour(campaign.look)}1A` : undefined}>
+            {DrawerRow($, t, campaignDrawer, hasDrawings)}
           </Box>
         )}
 
@@ -1028,6 +1324,8 @@ export const register: Register = on => {
             DrawerRow($, t, drawer, hasDrawings),
           ])}
         </Box>
+
+        {hasUpdate && <Text dimColor size="caption">{SLOT_TEXT.updateHint}</Text>}
       </Box>
     )
   })

@@ -4,7 +4,7 @@
 // validate.txt is the output of `claude plugin validate .`.
 // --release also checks that the folder is ready to publish.
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -24,16 +24,17 @@ const ALLOWED_CALLS = new Set([...surface.calls.map(call => call.slice(2)), 'plu
 // Every web address that may appear in hooks/, and the files it may appear in:
 // the one server address (BASE_URL), the official repository, the SVG
 // namespace, and the two forms catalogue.ts compares a signed link with. The
-// last two are never opened or fetched.
+// add-on never fetches a signed link; the person's own browser opens it.
 const ADDRESSES = surface.addresses
 const FORBIDDEN_CODE = /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|child_process|eval|globalThis|navigator|arguments)\b|\b(?:Function|require|import)\s*\(|\b(?:process|Bun|Deno)\./
-const ALLOWED_FILES = new Set(['offers.json', 'release.json', 'TERMS.md', 'PRIVACY.md', 'TERMS-REHEARSAL.md', 'PRIVACY-REHEARSAL.md'])
+const ALLOWED_FILES = new Set(['offers.json', 'release.json', 'TERMS.md', 'PRIVACY.md'])
 // The only functions in hooks/ that may be handed the engine object.
 const KNOWN_HELPERS = new Set([
-  'changeConsent', 'changeSaved', 'claimOffer', 'connectNow', 'copyCode', 'disconnectNow', 'DrawerRow', 'fetchCatalogue', 'forgetServerData',
-  'holdSaved', 'isAccepted', 'isUnreachable', 'loadCatalog', 'loadCodes', 'loadConnection', 'loadConsent', 'loadDocument', 'loadRelease',
-  'loadReleaseIfUsed', 'loadSaved', 'networkTick', 'paintStatus', 'pruneCodes', 'readLimits', 'redraw', 'refreshStatus', 'resetSaved', 'send',
-  'sendWithdrawal', 'settleConsent', 'syncAnimation', 'syncPresentTimer', 'syncUndoTimer', 'undoDisconnectNow', 'wakeServerLink',
+  'changeConsent', 'changeSaved', 'claimOffer', 'connectNow', 'copyCode', 'disconnectNow', 'DrawerRow', 'fetchCatalogue', 'forgetNoneLeft',
+  'forgetServerData', 'forgetTextsChanged', 'holdSaved', 'isAccepted', 'isUnreachable', 'loadCatalog', 'loadCodes', 'loadConnection',
+  'loadConsent', 'loadDocument', 'loadNoneLeft', 'loadRelease', 'loadReleaseIfUsed', 'loadSaved', 'networkTick', 'noteNoneLeft', 'paintStatus',
+  'pruneCodes', 'readLimits', 'redraw', 'refreshStatus', 'resetSaved', 'saveNoneLeft', 'send', 'sendWithdrawal', 'settleConsent',
+  'syncAnimation', 'syncPresentTimer', 'syncUndoTimer', 'tryNow', 'undoDisconnectNow', 'wakeServerLink',
 ])
 const ENGINE = String.raw`(?<![\w$.])\$(?![\w{])`
 // The one network call, and what it may be given.
@@ -185,8 +186,11 @@ if (release !== undefined) {
   const now = new Date()
   const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 
-  if (!isReal) fail(`release.json: testEndDate is not a real date: ${JSON.stringify(end)}`)
-  else if (isRelease && end < today) fail(`release.json: testEndDate ${end} is in the past`)
+  // Left out, or "", means no end date (the launch build), as hooks/connect-text.ts reads it.
+  const hasNoEnd = end === undefined || end === ''
+
+  if (!hasNoEnd && !isReal) fail(`release.json: testEndDate is not a real date: ${JSON.stringify(end)}`)
+  else if (!hasNoEnd && isRelease && end < today) fail(`release.json: testEndDate ${end} is in the past`)
 
   const keys = release?.catalogueKeys
 
@@ -294,7 +298,7 @@ walk(JSON.parse(read('offers.json')), item => {
 if (prizes === 0) fail('offers.json: no prizes found')
 
 if (isRelease) {
-  const LEGAL = ['TERMS.md', 'TERMS.ka.md', 'PRIVACY.md', 'PRIVACY.ka.md', 'TERMS-REHEARSAL.md', 'PRIVACY-REHEARSAL.md']
+  const LEGAL = ['TERMS.md', 'TERMS.ka.md', 'PRIVACY.md', 'PRIVACY.ka.md']
 
   // Terms, Privacy and the README may not ship with open values. A link is not
   // one, and neither is a bracket with fewer than two letters in it, such as
@@ -306,20 +310,24 @@ if (isRelease) {
   }
 
   for (const file of LEGAL) {
-    if (/DRAFT, not in force|ჯერ არ მოქმედებს/.test(read(file))) fail(`${file}: still marked as a draft`)
+    if (/DRAFT, not in force|DRAFT for Legal|ჯერ არ მოქმედებს/.test(read(file))) fail(`${file}: still marked as a draft`)
   }
+
+  // No rehearsal value or marked rehearsal wording may ship (scripts/release-gate.mjs lists each one).
+  const gate = spawnSync(process.execPath, ['scripts/release-gate.mjs', '.'], { encoding: 'utf8' })
+
+  if (gate.status !== 0) fail(`release gate: ${(gate.stdout + gate.stderr).trim().split(/\r?\n/).join('; ')}`)
 
   if (read('hooks/consent-text.ts').includes('[OWNER]')) fail('hooks/consent-text.ts: the public address still has [OWNER]')
 
-  // F5: a fresh repository of its own, with one commit and no personal address.
+  // F5: a repository of its own with no personal address. The first release was one commit; each later
+  // release adds one on top, so the count is not checked.
   const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
 
   try {
     if (realpathSync(git('rev-parse', '--show-toplevel')) !== realpathSync('.')) fail('not the top of its own git repository')
 
     const commits = git('log', '--all', '--format=%ae%n%ce').split('\n')
-
-    if (commits.length !== 2) fail(`history must be one commit, found ${commits.length / 2}`)
 
     for (const email of new Set(commits)) {
       if (!email.endsWith('@users.noreply.github.com')) fail('a commit does not use a no-reply address')

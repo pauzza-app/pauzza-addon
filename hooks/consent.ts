@@ -84,7 +84,29 @@ function changed(record: ConsentRecord, status: Exclude<Status, 'none'>, now: nu
 
 export const accept = (record: ConsentRecord, now: number, terms: Terms = CURRENT) => changed(record, 'given', now, terms, { dismissedTermsVersion: null, deletePending: false })
 export const decline = (record: ConsentRecord, now: number, terms: Terms = CURRENT) => changed(record, 'declined', now, terms)
-export const withdraw = (record: ConsentRecord, now: number, terms: Terms = CURRENT) => changed(record, 'withdrawn', now, terms, { deletePending: true })
+// The record keeps the Terms and wording versions of the acceptance it ends,
+// so that its Undo can bring back exactly that acceptance.
+export const withdraw = (record: ConsentRecord, now: number, terms: Terms = CURRENT) => changed(record, 'withdrawn', now, terms, { deletePending: true, wordingVersion: record.wordingVersion ?? WORDING_VERSION })
+
+// The Undo of "Pauzza is on", inside its undo time: the acceptance that was
+// withdrawn comes back exactly, with its own Terms and wording versions. It is
+// never an acceptance of the current texts: only the Connect press gives that.
+// So an earlier Terms version stays earlier, and is still asked again.
+export function undoWithdraw(record: ConsentRecord, now: number): ConsentRecord {
+  if (record.status !== 'withdrawn' || !record.deletePending || record.termsVersion === null || record.wordingVersion === null || shouldDelete(record, now)) {
+    return record
+  }
+
+  const { termsVersion, wordingVersion } = record
+
+  return {
+    ...record,
+    status: 'given',
+    at: now,
+    deletePending: false,
+    history: [...record.history, { event: 'given' as const, wordingVersion, termsVersion, at: now }].slice(-MAX_HISTORY),
+  }
+}
 export const dismissUpdate = (record: ConsentRecord, terms: Terms = CURRENT): ConsentRecord => ({ ...record, dismissedTermsVersion: terms.version })
 export const noteInviteSeen = (record: ConsentRecord, now: number): ConsentRecord => (record.inviteFirstSeen === null ? { ...record, inviteFirstSeen: now } : record)
 export const shouldDelete = (record: ConsentRecord, now: number) => record.deletePending && record.at !== null && now - record.at >= UNDO_MS

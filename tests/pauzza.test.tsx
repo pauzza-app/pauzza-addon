@@ -5,8 +5,9 @@ import type { TestBody } from 'claude-code/testing'
 import { dotsSvg, dotsWidth, drawerColour, fadedSvg, iconTileSvg, logoTileSvg } from '../hooks/art'
 import { bytesAt, DUMP_TEXT, lineAt, LOADINGS, loadingSvg, loadingTileSvg, packagesAt, stageAt } from '../hooks/loadings'
 import { canAnimate, statusFor, drawMeter, formatReset, isMeterId, METERS, parseResetMs, pickFiveHour, pickLimit, savedMeter, statusLine } from '../hooks/meters'
-import { accept, consentLine, decline, dismissUpdate, finishDelete, isRunning, readConsent, shouldDelete, UNDO_MS, viewOf, withdraw } from '../hooks/consent'
-import { CONSENT_TEXT, documentUrl, TERMS_VERSION, WORDING_VERSION } from '../hooks/consent-text'
+import { accept, consentLine, decline, dismissUpdate, finishDelete, isRunning, readConsent, shouldDelete, UNDO_MS, undoWithdraw, viewOf, withdraw } from '../hooks/consent'
+import { CONSENT_TEXT, documentUrl, TERMS_EFFECTIVE, TERMS_VERSION, WORDING_VERSION } from '../hooks/consent-text'
+import { CONNECT_TEXT } from '../hooks/connect-text'
 import { checkText, parseCatalog, sortOffers } from '../hooks/offers'
 import {
   addWait,
@@ -236,8 +237,16 @@ function fakeEngine(on: any, nowMs = NINE_AM, rateLimits: () => unknown[] = () =
 
     return <Text>engine</Text>
   })
+  // No real network here: the Connect press is the acceptance too, and its
+  // connection, tested in stage2.test.tsx, fails calmly against this stub.
+  const sent: string[] = []
+  on('http.fetch', (_: unknown, e: { url: string }) => {
+    sent.push(e.url)
 
-  return { clock, seen, lines, opened, toasts, store, reads }
+    return { value: { status: 503, text: '', headers: {} } }
+  })
+
+  return { clock, seen, lines, opened, toasts, store, reads, sent }
 }
 
 async function setWorking($: any, isWorking: boolean) {
@@ -988,6 +997,28 @@ test('consent: the invitation goes quiet after 7 days and proofreading asks nobo
   expect(viewOf({ ...accept(never(), NINE_AM, TERMS), wordingVersion: 'older' }, NINE_AM, TERMS)).toBe('active')
 })
 
+test('consent: the Undo of "Pauzza is on" brings back exactly the acceptance switched off, never the current texts', () => {
+  const old = { ...accept(never(), NINE_AM, { version: 'local-1', effective: '2026-11-09' }), wordingVersion: 'stage-1.4-en' }
+  const off = withdraw(old, NINE_AM + MINUTE, TERMS)
+  const back = undoWithdraw(off, NINE_AM + MINUTE + 5 * SECOND)
+
+  expect(off.wordingVersion).toBe('stage-1.4-en')
+  expect(back.status).toBe('given')
+  expect(back.termsVersion).toBe('local-1')
+  expect(back.wordingVersion).toBe('stage-1.4-en')
+  expect(back.deletePending).toBe(false)
+  expect(back.history.at(-1)).toEqual({ event: 'given', termsVersion: 'local-1', wordingVersion: 'stage-1.4-en', at: NINE_AM + MINUTE + 5 * SECOND })
+  // Still the earlier Terms: asked again, and paused once the new ones apply.
+  expect(viewOf(back, AFTER_EFFECT, TERMS)).toBe('update-required')
+  // Too late, already deleted, or nothing switched off: nothing changes.
+  expect(undoWithdraw(off, NINE_AM + MINUTE + UNDO_MS)).toBe(off)
+  const deleted = finishDelete(off)
+  expect(undoWithdraw(deleted, NINE_AM + MINUTE + SECOND)).toBe(deleted)
+  expect(undoWithdraw(old, NINE_AM + MINUTE)).toBe(old)
+  const declined = decline(never(), NINE_AM, TERMS)
+  expect(undoWithdraw(declined, NINE_AM + SECOND)).toBe(declined)
+})
+
 test('consent: deletion waits exactly for the undo time', () => {
   const gone = withdraw(accept(never(), NINE_AM, TERMS), NINE_AM, TERMS)
 
@@ -996,29 +1027,32 @@ test('consent: deletion waits exactly for the undo time', () => {
   expect(shouldDelete(finishDelete(gone), NINE_AM + UNDO_MS)).toBe(false)
 })
 
-test('consent: the wording matches the legal table and never says consent', () => {
-  expect(CONSENT_TEXT.what).toBe('This is a test version: every offer and code is made up and works nowhere. Pauzza sends nothing from your computer and does not read your code, prompts or conversations.')
-  expect(CONSENT_TEXT.tick).toBe('☐ I accept the Terms')
+test('consent: the wording around the one press never says consent, and points to the Connect button', () => {
+  // The separate tick and its own lines are gone: the Connect card's words are the acceptance (connect-text.ts).
+  for (const gone of ['what', 'tick', 'age', 'cancelIn', 'updateTick']) {
+    expect(Object.hasOwn(CONSENT_TEXT, gone)).toBe(false)
+  }
+
   expect(CONSENT_TEXT.later).toBe('Not now')
-  expect(CONSENT_TEXT.age).toBe('By pressing you confirm you are 18 or older.')
-  expect(CONSENT_TEXT.cancelIn).toBe('Cancel in ⚙')
   expect(CONSENT_TEXT.settingOn).toBe('☑ Pauzza is on')
   expect(CONSENT_TEXT.settingWarn).toBe('If you switch Pauzza off, it stops and saved data is deleted.')
   expect(CONSENT_TEXT.updated).toBe('Terms updated')
-  expect(CONSENT_TEXT.updateTick).toBe('☐ I accept the updated terms')
-  expect(CONSENT_TEXT.declined.endsWith('press "I accept the Terms".')).toBe(true)
-  expect(CONSENT_TEXT.stopped.endsWith('press "I accept the Terms".')).toBe(true)
-  expect(Object.values(CONSENT_TEXT).filter(item => typeof item === 'string' && /\bBy ticking\b|\btick it\b/i.test(item))).toEqual([])
+  expect(CONSENT_TEXT.declined).toBe('OK. Pauzza will show nothing and count nothing. If you change your mind, press "Connect".')
+  expect(CONSENT_TEXT.stopped).toBe('Pauzza is stopped. If you change your mind, press "Connect".')
+  // Everyone who accepted the earlier tick (local-1) is asked again, from the Stage B start.
+  expect(TERMS_VERSION).not.toBe('local-1')
+  expect(TERMS_EFFECTIVE).toBe('2026-11-20')
+  expect(Object.values(CONSENT_TEXT).filter(item => typeof item === 'string' && /\bBy ticking\b|\btick it\b|sends nothing|I accept the/i.test(item))).toEqual([])
   expect(documentUrl('TERMS.md', 'https://github.com/owner/pauzza-addon')).toBe('https://github.com/owner/pauzza-addon/blob/main/TERMS.md')
   expect(documentUrl('PRIVACY.md', 'https://github.com/owner/pauzza-addon')).toBe('https://github.com/owner/pauzza-addon/blob/main/PRIVACY.md')
   expect(CONSENT_TEXT.samples).toBe('Samples · not real offers')
   expect(Object.values(CONSENT_TEXT).filter(item => /consent|processing/i.test(typeof item === 'string' ? item : item(10)))).toEqual([])
 })
 
-engineTest('first run: nothing before the tick, then the present after 15 seconds', async ($, on) => {
+engineTest('first run: nothing before the one press, then the present after 15 seconds', async ($, on) => {
   await withConsent(undefined, async () => {
     catalogNow = JSON.stringify({ ...JSON.parse(CATALOG), defaultMeters: ['rain'], milestones: [{ id: 'first', minutes: 0.25, brand: 'Test Q', text: 'x', code: 'TEST-Q001' }] })
-    const { clock, lines, toasts, calls } = countingEngine(on, new Date(2026, 10, 9, 13, 0).getTime())
+    const { clock, lines, toasts, calls, sent } = countingEngine(on, new Date(2026, 10, 9, 13, 0).getTime())
     await start($)
 
     expect(lines.at(-1)).toBe(CONSENT_TEXT.invite)
@@ -1030,18 +1064,22 @@ engineTest('first run: nothing before the tick, then the present after 15 second
     expect(toasts).toEqual([])
 
     let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    const tick = await ui.find({ key: 'consent-tick' })
-    expect(tick.props.label).toBe(CONSENT_TEXT.tick)
-    expect(tick.props.autoFocus).toBe(undefined)
-    expect(tick.props.hotkey).toBe(undefined)
-    expect(tick.props.variant).toBe('primary')
+    const press = await ui.find({ key: 'connect-press' })
+    expect(press.props.label).toBe(CONNECT_TEXT.connect)
+    expect(press.props.autoFocus).toBe(undefined)
+    expect(press.props.hotkey).toBe(undefined)
+    expect(press.props.variant).toBe('primary')
     expect((await ui.find({ key: 'consent-later' })).props.dimColor).toBe(undefined)
     expect(await ui.find({ key: 'consent-later' })).toBeDefined()
+    expect(await ui.find({ key: 'consent-tick' })).toBe(undefined)
     expect(await ui.find({ key: 'settings-toggle' })).toBe(undefined)
     expect(await ui.find({ type: 'Text', text: /Test/ })).toBe(undefined)
     expect(calls.usage).toBe(0)
+    expect(sent).toEqual([])
 
-    ui = await pressAndRedraw($, ui, 'consent-tick', 'desktop')
+    // The one press accepts and connects; here the connection fails calmly, and Pauzza runs on this computer.
+    ui = await pressAndRedraw($, ui, 'connect-press', 'desktop')
+    expect(sent).toHaveLength(1)
     expect(lines.at(-1)).not.toBe(CONSENT_TEXT.invite)
     expect(await ui.find({ type: 'Text', text: /accepted/i })).toBe(undefined)
     expect(await ui.find({ type: 'Text', text: /^Samples · not real offers$/ })).toBeDefined()
@@ -1055,48 +1093,52 @@ engineTest('first run: nothing before the tick, then the present after 15 second
   })
 })
 
-engineTest('declining: offers stay off, the line empties, the tick stays', async ($, on) => {
-  await withConsent(undefined, async () => {
-    const { lines, toasts, clock, calls } = countingEngine(on)
-    await start($)
-    let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    ui = await pressAndRedraw($, ui, 'consent-later')
+for (const surface of ['terminal', 'desktop'] as const) {
+  engineTest(`declining (${surface}): offers stay off, the line empties, the one button stays`, async ($, on) => {
+    await withConsent(undefined, async () => {
+      const { lines, toasts, clock, calls, sent } = countingEngine(on)
+      await start($)
+      let ui = await $.ui.mount({ ...PANE, surface })
+      ui = await pressAndRedraw($, ui, 'consent-later', surface)
 
-    expect(lines.at(-1)).toBe(undefined)
-    expect(await ui.find({ key: 'consent-later' })).toBe(undefined)
-    expect(await ui.find({ key: 'consent-tick' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /count nothing/ })).toBeDefined()
-    await clock.advance(10 * MINUTE)
-    expect(calls.usage).toBe(0)
-    expect(toasts).toEqual([])
-    await ui.unmount()
+      expect(lines.at(-1)).toBe(undefined)
+      expect(await ui.find({ key: 'consent-later' })).toBe(undefined)
+      expect(await ui.find({ key: 'connect-press' })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /count nothing/ })).toBeDefined()
+      await clock.advance(10 * MINUTE)
+      expect(calls.usage).toBe(0)
+      expect(toasts).toEqual([])
+      expect(sent).toEqual([])
+      await ui.unmount()
+    })
   })
-})
+}
 
-engineTest('ignoring: the line goes quiet, nothing opens, and the tick stays available', async ($, on) => {
+engineTest('ignoring: the line goes quiet, nothing opens, and the one button stays available', async ($, on) => {
   await withConsent({ status: 'none', inviteFirstSeen: NINE_AM - 8 * 24 * 60 * MINUTE }, async () => {
     const { lines, opened } = usageEngine(on, () => [])
     await start($)
     expect(lines.at(-1)).toBe(undefined)
     expect(opened).toEqual([])
     let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ key: 'consent-tick' })).toBeDefined()
+    expect(await ui.find({ key: 'connect-press' })).toBeDefined()
     await ui.unmount()
   })
 })
 
-engineTest('the documents open inside the panel before accepting', async ($, on) => {
+engineTest('the documents the press accepts open inside the panel before it', async ($, on) => {
   await withConsent(undefined, async () => {
-    fakeEngine(on)
+    const { sent } = fakeEngine(on)
     let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    ui = await pressAndRedraw($, ui, 'open-terms', 'desktop')
+    ui = await pressAndRedraw($, ui, 'connect-terms', 'desktop')
     expect((await ui.find({ key: 'document-text' })).props.text).toMatch(/TERMS\.md\n$/)
     expect(await ui.find({ key: 'document-online' })).toBe(undefined)
     ui = await pressAndRedraw($, ui, 'document-back', 'desktop')
-    ui = await pressAndRedraw($, ui, 'open-privacy', 'desktop')
+    ui = await pressAndRedraw($, ui, 'connect-privacy', 'desktop')
     expect((await ui.find({ key: 'document-text' })).props.text).toMatch(/PRIVACY\.md\n$/)
     ui = await pressAndRedraw($, ui, 'document-back', 'desktop')
-    expect(await ui.find({ key: 'consent-tick' })).toBeDefined()
+    expect(await ui.find({ key: 'connect-press' })).toBeDefined()
+    expect(sent).toEqual([])
     await ui.unmount()
   })
 })
@@ -1131,7 +1173,9 @@ engineTest('withdrawing is one press: stops at once, undo restores, otherwise da
   const record = readConsent(store.get('consent'))
   expect(record.status).toBe('withdrawn')
   expect(record.deletePending).toBe(false)
-  expect(await ui.find({ key: 'consent-tick' })).toBeDefined()
+  // Coming back is the same one press, with no Not now.
+  expect(await ui.find({ key: 'connect-press' })).toBeDefined()
+  expect(await ui.find({ key: 'consent-later' })).toBe(undefined)
   await ui.unmount()
   savedSeed = { meterDisplay: 'always' }
 })
@@ -1158,27 +1202,39 @@ engineTest('deleting saved data keeps the acceptance', async ($, on) => {
   savedSeed = { meterDisplay: 'always' }
 })
 
-engineTest('changed terms before they apply: keeps running and asks again', async ($, on) => {
-  await withConsent({ ...GIVEN, termsVersion: 'older' }, async () => {
-    savedSeed = WITH_METER
-    const { lines, store } = usageEngine(on, () => [], new Date(2026, 10, 8, 9, 0).getTime())
-    await start($)
+// The day TERMS_EFFECTIVE names, at the given hour on this computer's clock.
+const onEffectiveDay = (hour: number, days = 0) => {
+  const [year, month, day] = TERMS_EFFECTIVE.split('-').map(Number)
 
-    expect(lines.at(-1)).toBe(CONSENT_TEXT.updateLine)
-    let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect((await ui.find({ key: 'consent-tick' })).props.label).toBe(CONSENT_TEXT.updateTick)
-    expect(await ui.find({ key: 'meter-change' })).toBeDefined()
-    ui = await pressAndRedraw($, ui, 'consent-tick')
-    expect(await ui.find({ key: 'consent-tick' })).toBe(undefined)
-    expect(readConsent(store.get('consent')).termsVersion).toBe(TERMS_VERSION)
-    await ui.unmount()
+  return new Date(year, month - 1, day + days, hour, 0).getTime()
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  engineTest(`changed terms before they apply (${surface}): keeps running and asks again with the one press`, async ($, on) => {
+    await withConsent({ ...GIVEN, termsVersion: 'older' }, async () => {
+      savedSeed = WITH_METER
+      const { lines, store } = usageEngine(on, () => [], onEffectiveDay(9, -1))
+      await start($)
+
+      expect(lines.at(-1)).toBe(CONSENT_TEXT.updateLine)
+      let ui = await $.ui.mount({ ...PANE, surface })
+      expect(await ui.find({ type: 'Text', text: /^Terms updated$/ })).toBeDefined()
+      expect((await ui.find({ key: 'connect-press' })).props.label).toBe(CONNECT_TEXT.connect)
+      // One button only: the update notice holds it, and no second Connect card shows.
+      expect(await ui.findAll({ key: 'connect-press' })).toHaveLength(1)
+      expect(await ui.find({ key: 'meter-change' })).toBeDefined()
+      ui = await pressAndRedraw($, ui, 'connect-press', surface)
+      expect(await ui.find({ type: 'Text', text: /^Terms updated$/ })).toBe(undefined)
+      expect(readConsent(store.get('consent')).termsVersion).toBe(TERMS_VERSION)
+      await ui.unmount()
+    })
   })
-})
+}
 
 engineTest('changed terms after they apply: pauses, keeps prizes, can still withdraw', async ($, on) => {
   await withConsent({ ...GIVEN, termsVersion: 'older' }, async () => {
     savedSeed = WITH_METER
-    const { lines, store, calls } = countingEngine(on)
+    const { lines, store, calls } = countingEngine(on, onEffectiveDay(9))
     await start($)
 
     expect(lines.at(-1)).toBe(CONSENT_TEXT.updateLine)
@@ -1274,6 +1330,7 @@ test('v2: moving off a retired meter loses nothing else that was saved', () => {
     dropPopupShown: true,
     burnFiveEarned: true,
     burnWeekUntil: NINE_AM + 2 * 24 * 60 * MINUTE,
+    updateAnnounced: '0.22.0',
   }
 
   RETIRED.forEach(meter => {
@@ -1295,6 +1352,7 @@ test('v2: moving off a retired meter loses nothing else that was saved', () => {
   expect(nextDay.meterDisplay).toBe('off')
   expect(nextDay.popupsOn).toBe(false)
   expect(nextDay.burnWeekUntil).toBe(before.burnWeekUntil)
+  expect(nextDay.updateAnnounced).toBe(before.updateAnnounced)
 })
 
 engineTest('v2: someone who had a retired meter opens on line 42 with their prizes, settings and acceptance kept', async ($, on) => {
@@ -1310,7 +1368,9 @@ engineTest('v2: someone who had a retired meter opens on line 42 with their priz
 
   let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ key: 'carousel-choose' })).toBe(undefined)
-  expect(await ui.find({ key: 'consent-tick' })).toBe(undefined)
+  // Not asked again: no Not now and no "Terms updated".
+  expect(await ui.find({ key: 'consent-later' })).toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /^Terms updated$/ })).toBe(undefined)
   expect(await ui.find({ key: 'meter-change' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^line 42$/ })).toBeDefined()
   expect(await sources(ui)).toContain(loadingSvg('line42', 50))
@@ -1539,7 +1599,7 @@ engineTest('v2: after accepting, the default terminal meter is pictured wide, an
     expect(await ui.find({ type: 'Text', text: /Test/ })).toBe(undefined)
     expect(calls.usage).toBe(0)
 
-    ui = await pressAndRedraw($, ui, 'consent-tick', 'desktop')
+    ui = await pressAndRedraw($, ui, 'connect-press', 'desktop')
     expect(calls.usage).toBeGreaterThan(0)
     expect(await ui.find({ key: 'carousel-choose' })).toBe(undefined)
     expect(await ui.find({ type: 'Text', text: /^hexdump$/ })).toBeDefined()
@@ -1673,29 +1733,32 @@ engineTest('English only: no Georgian character in any consent view, the active 
     await ui.unmount()
   }
 
-  let limits: unknown[] = [{ kind: 'five_hour', percentUsed: 50, resetsAt: new Date(2026, 10, 12).toISOString() }]
+  // The day before the Stage B texts apply, so that the changed-terms views below are both reached.
+  const resetsAt = new Date(onEffectiveDay(0, 3)).toISOString()
+  let limits: unknown[] = [{ kind: 'five_hour', percentUsed: 50, resetsAt }]
   const look = () => $.session.measure({ context: {}, rateLimits: [], changed: ['rateLimits'] })
 
   await withConsent(undefined, async () => {
     catalogNow = JSON.stringify({ ...JSON.parse(CATALOG), defaultMeters: ['rain'], dailyPresent: true, milestones: [{ id: 'first', minutes: 0.25, brand: 'Test Q', text: 'x', code: 'TEST-Q001' }] })
-    const { clock, lines, toasts, store } = usageEngine(on, () => limits, new Date(2026, 10, 8, 9, 0).getTime())
+    const { clock, lines, toasts, store } = usageEngine(on, () => limits, onEffectiveDay(9, -1))
     await start($)
     await leaveSettings($)
 
     // Asked, with each document open, then declined.
     for (const surface of ['terminal', 'desktop'] as const) {
       await walk(surface)
-      await walk(surface, ['open-terms'])
-      await walk(surface, ['document-back', 'open-privacy'])
+      await walk(surface, ['connect-terms'])
+      await walk(surface, ['document-back', 'connect-privacy'])
       await walk(surface, ['document-back'])
     }
 
     await walk('desktop', ['consent-later'])
     await walk('terminal')
 
-    // Accepted: the active view with its meter, then with each drawer
-    // open, the meter picker and the settings.
-    await walk('desktop', ['consent-tick'])
+    // Accepted with the one press (its connection fails calmly here): the
+    // active view with its meter, then with each drawer open, the meter
+    // picker and the settings.
+    await walk('desktop', ['connect-press'])
     await walk('terminal')
     await clock.advance(4 * 60 * MINUTE)
 
@@ -1726,8 +1789,8 @@ engineTest('English only: no Georgian character in any consent view, the active 
     await walk('desktop')
 
     // Accepted again and stopped at 100%: the Limit Lounge.
-    await walk('desktop', ['consent-tick'])
-    limits = [{ kind: 'five_hour', percentUsed: 100, resetsAt: new Date(2026, 10, 12).toISOString() }]
+    await walk('desktop', ['connect-press'])
+    limits = [{ kind: 'five_hour', percentUsed: 100, resetsAt }]
     await look()
     expect(await panelHas($, /^🛋 Limit Lounge: best offers first$/)).toBe(true)
     await walk('terminal')
@@ -1747,5 +1810,6 @@ engineTest('English only: no Georgian character in any consent view, the active 
   expect(said.length).toBeGreaterThan(5)
   expect(said.filter(line => typeof line === 'string' && GEORGIAN.test(line))).toEqual([])
   expect(Object.values(CONSENT_TEXT).filter(item => GEORGIAN.test(typeof item === 'string' ? item : item(10)))).toEqual([])
+  expect(Object.values(CONNECT_TEXT).filter(item => GEORGIAN.test(typeof item === 'string' ? item : item(10)))).toEqual([])
   expect(METERS.filter(meter => GEORGIAN.test(meter.name))).toEqual([])
 })

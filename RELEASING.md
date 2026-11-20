@@ -9,7 +9,7 @@ Two public repositories are involved, so that changing what users receive always
 
 ## First release
 
-**1. Fill in the open values.** Replace every bracketed value in the Terms and Privacy Policy, including the test versions `TERMS-REHEARSAL.md` and `PRIVACY-REHEARSAL.md`, and remove their draft notices. Set `"testEndDate"` in `release.json` to the test's real last day, the same day the two test documents give, and check that `"catalogueKeys"` holds the signing tool's public keys. The repositories live in the `pauzza-app` organisation. Never rename or delete it or them: someone else could claim the old address.
+**1. Fill in the open values.** Replace every bracketed value in the Terms and Privacy Policy and their Georgian versions, and remove any draft notice. For a launch build, leave `"testEndDate"` out of `release.json` (or set it to `""`): it means no end date. A test build sets it to the test's real last day. Check that `"catalogueKeys"` holds the signing tool's public keys. Run `node scripts/release-gate.mjs .`: it must say "Ready", and it lists every test-only value or marked test wording that is left. The repositories live in the `pauzza-app` organisation. Never rename or delete it or them: someone else could claim the old address.
 
 **2. Build a clean folder from tracked files only.** Commit every change first: only committed files are copied, so anything left uncommitted, and any file git does not track, stays behind. Run this from the add-on's own folder: `public-release/` in the company checkout, or the root of a clone of `pauzza-addon`. Never copy a working folder by hand: the tool generates `.claude-plugin/types/` on each machine, and it lists that machine's connected accounts.
 
@@ -73,8 +73,11 @@ Then type `/reload-plugins` and `/pauzza` in a session. Also try the two-command
 ## Later releases
 
 1. Raise `version` in `.claude-plugin/plugin.json`. People receive a new copy only when it changes.
-2. Merge through a reviewed pull request. CI must pass.
-3. Tag the merged commit and publish its SHA-256.
-4. Agents prepare the new marketplace entry and a change note. The owner alone reviews it and pushes it, as in step 6.
+2. Run `node scripts/release-gate.mjs .`; it must say "Ready".
+3. If the release changes the Connect texts (wording, Terms or Privacy versions), the server must accept the new versions **before** anyone receives the add-on. Otherwise every connected person is disconnected and cannot connect again.
+4. Add one commit on top of the published history (never rewrite it), run the checks in step 4, push, tag, and publish the SHA-256. In the company checkout, `bash scripts/publish-update.sh` walks through all of this; `--dry-run` runs every check and publishes nothing.
+5. Agents prepare the new marketplace entry and a change note. The owner alone reviews it and pushes it, as in step 6.
+
+**If the release extends the test** (same texts, a later `testEndDate` in `release.json`, at most 7 days more): Stale windows still on the earlier build end the test on its original date.
 
 Never rename or delete either repository or the owner account: someone else could claim the old address, and installs would follow it.

@@ -1,6 +1,7 @@
 // Waiting Pays, the gift mark and the Daily Drop. Pure: every input
 // is the clock, the working state, or a press in the panel.
 
+import { VERSION_FORMAT } from './catalogue'
 import type { Drop, Reward } from './offers'
 import { isMeterDisplay, savedMeter } from './meters'
 import type { FiveHour, MeterDisplay, MeterId } from './meters'
@@ -37,11 +38,14 @@ export type Saved = {
   dropPopupShown: boolean
   burnFiveEarned: boolean
   burnWeekUntil: number | null
+  // The newest add-on version already announced by the update pop-up.
+  updateAnnounced: string | null
 }
 
-type Lasting = Pick<Saved, 'recent' | 'meter' | 'welcomeEarned' | 'windowResetAt' | 'windowPeak' | 'installedAt' | 'milestonesSeen' | 'meterDisplay' | 'popupsOn' | 'burnWeekUntil'>
+type Lasting = Pick<Saved, 'recent' | 'meter' | 'welcomeEarned' | 'windowResetAt' | 'windowPeak' | 'installedAt' | 'milestonesSeen' | 'meterDisplay' | 'popupsOn' | 'burnWeekUntil' | 'updateAnnounced'>
 
-function pad(value: number): string {
+// Two digits, as on a clock: 9 → "09".
+export function pad(value: number): string {
   return String(value).padStart(2, '0')
 }
 
@@ -98,6 +102,7 @@ export function readSaved(raw: unknown, nowMs: number): Saved {
     meterDisplay: isMeterDisplay(data.meterDisplay) ? data.meterDisplay : 'ready',
     popupsOn: data.popupsOn !== false,
     burnWeekUntil: typeof data.burnWeekUntil === 'number' ? data.burnWeekUntil : null,
+    updateAnnounced: typeof data.updateAnnounced === 'string' && VERSION_FORMAT.test(data.updateAnnounced) ? data.updateAnnounced : null,
   }
 
   if (data.date !== today) {
@@ -122,10 +127,12 @@ export function readSaved(raw: unknown, nowMs: number): Saved {
 
 // Adds a finished wait. The mark is raised at most once for a wait, a few times
 // a day: only when a wait of 2+ minutes first ends that day or a reward is ready.
-export function addWait(saved: Saved, waitMs: number, rewards: readonly Reward[]): Saved {
+// After Connect there are no practice rewards: the minutes are counted, and
+// nothing is earned (`rewards` empty, `hasFinish` false).
+export function addWait(saved: Saved, waitMs: number, rewards: readonly Reward[], hasFinish = true): Saved {
   const minutes = Math.min(saved.minutes + waitMs / 60_000, DAILY_CAP_MINUTES)
   const newlyReady = rewards.filter(reward => saved.minutes < reward.minutes && reward.minutes <= minutes).length
-  const isFinish = waitMs >= FINISH_WAIT_MS && !saved.finishEarned
+  const isFinish = hasFinish && waitMs >= FINISH_WAIT_MS && !saved.finishEarned
   const gifts = newlyReady + (isFinish ? 1 : 0)
   const isMarked = gifts > 0 && saved.marksRaised < MAX_MARKS_PER_DAY
 
@@ -224,14 +231,18 @@ export function hasBurnWeek(saved: Saved, now: number): boolean {
 
 // A prize for reaching 100%: the 5-hour limit at most once a day, the weekly
 // limit at most once per weekly window. Earned even with pop-ups turned off.
-export function takeBurnouts(saved: Saved, five: FiveHour | undefined, week: FiveHour | undefined, now: number): { saved: Saved; popups: string[] } {
+// `prizes` says whether a prize is really waiting for each: always before
+// Connect (the practice prizes), and after it only when the signed list holds
+// one. Reaching the limit is noted either way; the gift mark and the pop-up
+// come only with a prize.
+export function takeBurnouts(saved: Saved, five: FiveHour | undefined, week: FiveHour | undefined, now: number, prizes = { five: true, week: true }): { saved: Saved; popups: string[] } {
   if (saved.meter === null) {
     return { saved, popups: [] }
   }
 
   const earnsFive = five !== undefined && five.percent >= 100 && !saved.burnFiveEarned
   const earnsWeek = week !== undefined && week.percent >= 100 && !hasBurnWeek(saved, now)
-  const gifts = Number(earnsFive) + Number(earnsWeek)
+  const gifts = Number(earnsFive && prizes.five) + Number(earnsWeek && prizes.week)
 
   return {
     saved: {
@@ -240,7 +251,7 @@ export function takeBurnouts(saved: Saved, five: FiveHour | undefined, week: Fiv
       burnWeekUntil: earnsWeek ? (week.resetMs !== undefined && week.resetMs > now ? week.resetMs : now + WEEK_MS) : saved.burnWeekUntil,
       marksPending: saved.marksPending + gifts,
     },
-    popups: canPopUp(saved) ? [...(earnsFive ? [BURN_FIVE_POPUP] : []), ...(earnsWeek ? [BURN_WEEK_POPUP] : [])] : [],
+    popups: canPopUp(saved) ? [...(earnsFive && prizes.five ? [BURN_FIVE_POPUP] : []), ...(earnsWeek && prizes.week ? [BURN_WEEK_POPUP] : [])] : [],
   }
 }
 

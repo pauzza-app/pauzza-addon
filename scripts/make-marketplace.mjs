@@ -32,7 +32,7 @@ const marketplace = {
   plugins: [
     {
       name,
-      description: 'Pauzza practice run with fictional test offers.',
+      description: 'Pauzza: offers and promo codes while your AI tool works.',
       source: { source: 'github', repo, ref, sha },
     },
   ],

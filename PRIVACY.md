@@ -1,58 +1,30 @@
 # Pauzza Privacy Policy
 
-Version 1.0 · In effect from 9 November 2026
+Version 1.0 · From 20 November 2026
 
-This text is also available [in Georgian](https://github.com/pauzza-app/pauzza-addon/blob/main/PRIVACY.ka.md). Both versions are equally valid. If they differ, the meaning more favourable to you applies.
+1. **Who we are.** U trust LLC, ID code 406273786, 50/18 Ketevan Tsamebuli Ave / Bochorma St., Commercial Space 5, Block C, Floors 1-2 (duplex), Isani District, Tbilisi, Georgia, hello@pauzza.ge, is responsible for your data.
 
-## The short version
+2. **What we never collect.** Your code, prompts, conversations or files; your name, phone or payment details. Your usage figures stay on your computer.
 
-- Pauzza sends nothing from your computer. We receive nothing about you from the add-on.
-- It never reads your code, prompts or conversations.
-- What it saves stays on your computer, and you can delete it.
+3. **What we process after you press "Connect".**
+   - A random number for your install, a short reference shown in Settings, when you connected, when the add-on last contacted us, and the add-on's version.
+   - The codes you get, and when.
+   - A record of what you accepted at "Connect", and when.
+   - Technical information about your device. We may read and store it in a scrambled form, as needed to duly provide the service and to prevent misuse.
+   - Your network (IP) address, used when the add-on contacts our server. We do not store it with your install. To limit misuse, we keep only a scrambled form of it, for 24 hours.
 
-## 1. Who we are
+   We use this to provide the service: to show you partners' offers and to give you codes. You agree to this, and to receiving partners' offers in Pauzza, by pressing "Connect".
 
-U trust LLC, a limited liability company, ID code 406273786, address: 50/18 Ketevan Tsamebuli Ave / Bochorma St., Commercial Space 5, Block C, Floors 1-2 (duplex), Isani District, Tbilisi, Georgia, hello@pauzza.ge
+4. **Limit prizes.** When you get a code for a 5-hour or weekly limit prize, we can tell that you reached that usage limit of your AI tool that day or week. Nothing else about your usage is sent.
 
-## 2. What the add-on reads on your computer
+5. **Partners** get no data about you. They see only the code at their checkout, and tell us which codes were used.
 
-- The tool's usage percentages and reset times, to draw the meter.
-- A yes-or-no signal for whether the tool is working, and the clock.
+6. **Service providers.** We use service providers for hosting, email and similar services. They process data on our behalf in the EU and in other countries.
 
-## 3. What it saves on your computer
+7. **How long.** We keep the data while you are connected. After you disconnect, we delete your install record. We may keep limited technical data for as long as needed to duly provide the service and prevent misuse, such as applying offer limits. Records of what you accepted are kept for 1 year. Our hosting provider's technical logs are kept for a few days.
 
-One small record in the AI tool's store for this add-on:
+   We use no analytics, advertising trackers or third-party scripts.
 
-- your acceptance and when you gave it;
-- today's date, minutes counted and which presents and offers were used today;
-- your meter choice, line and pop-up settings;
-- the current usage window's reset time and highest percentage, and until when this week's limit prize lasts;
-- when the add-on first ran, which presents have been marked, and the last 8 sample offers you copied.
+8. **Your rights.** You can ask what data we hold, ask us to correct or delete it, or stop receiving offers by disconnecting in Settings. Write to hello@pauzza.ge with the short reference shown in Settings.
 
-Daily items clear each day. The rest stays until you delete it. A code reaches your clipboard only when you press its copy button.
-
-## 4. What we never do
-
-We do not collect your code, prompts, conversations, files, name, email, phone or internet (IP) address through the add-on. We do not sell data, build profiles or put anything into what the AI reads.
-
-## 5. Deleting it
-
-In `/pauzza`, press ⚙, then "Delete" next to the saved data, then confirm. Uninstalling does not by itself promise to remove the file, so delete first.
-
-## 6. Other companies
-
-The AI tool, and the site that hosts the add-on's code, handle their own data under their own policies. We do not control them or receive data from them through the add-on.
-
-## 7. If you write to us
-
-If you email us or post on the public code site, we receive what you send and your address or username. We use it only to answer you, on the basis of your request, and delete emails within 12 months unless the law requires longer. Do not post private details publicly.
-
-For such data you can ask to see, correct or delete it. We answer within 10 working days. You can complain to the State Audit Service of Georgia or a court.
-
-## 8. Age
-
-Pauzza is for people aged 18 or over.
-
-## 9. Changes
-
-If a later version would send anything from your computer, it will not do so under this Policy. It will first show a new policy and ask you to press "Connect".
+9. **Changes.** When this policy changes, your earlier connection ends: we delete your install record, as when you disconnect. The add-on then shows the new version. To keep receiving offers, press "Connect" again. Codes you already have stay on your computer until their "use by" date.

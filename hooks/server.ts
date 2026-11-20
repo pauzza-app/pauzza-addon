@@ -5,14 +5,14 @@
 // Requests carry only the fields below: never code, prompts, conversations,
 // file names, usage percentages, waiting time or anything from the machine.
 
-import { CODE_FORMAT, parseIso } from './catalogue'
+import { CODE_FORMAT, ID_FORMAT, parseIso, VERSION_FORMAT as ADDON_VERSION_FORMAT } from './catalogue'
 
 export const BASE_URL = 'https://pwchzyltlirhiiaxoifb.supabase.co/functions/v1/'
 // Must equal the version in `.claude-plugin/plugin.json`. Sent at Connect, and
 // compared with the signed list's minimum version.
-export const ADDON_VERSION = '0.20.2'
+export const ADDON_VERSION = '0.21.0'
 
-export type Endpoint = 'connect' | 'catalogue' | 'claim' | 'withdraw'
+export type Endpoint = 'connect' | 'catalogue2' | 'claim' | 'withdraw'
 export type Outgoing = { url: string; method: 'GET' | 'POST'; headers: Record<string, string>; body?: string }
 export type Reply = { status: number; text: string; headers: Record<string, string> }
 export type Versions = { wordingVersion: string; termsVersion: string; privacyVersion: string }
@@ -26,15 +26,11 @@ const TOKEN_FORMAT = /^[A-Za-z0-9_-]{43}$/
 const REF_FORMAT = /^[0-9A-HJKMNP-TV-Z]{10}$/
 const UUID_FORMAT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const VERSION_FORMAT = /^[0-9A-Za-z.-]{1,20}$/
-const ADDON_VERSION_FORMAT = /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/
-const CAMPAIGN_FORMAT = /^[a-z0-9-]{1,40}$/
-const ETAG_FORMAT = /^"[0-9a-f]{64}"$/
 const DAY_MS = 86_400_000
 
 export const isToken = (value: unknown): value is string => typeof value === 'string' && TOKEN_FORMAT.test(value)
 export const isPublicRef = (value: unknown): value is string => typeof value === 'string' && REF_FORMAT.test(value)
 export const isUuid = (value: unknown): value is string => typeof value === 'string' && UUID_FORMAT.test(value)
-export const isEtag = (value: unknown): value is string => typeof value === 'string' && ETAG_FORMAT.test(value)
 const areVersions = (v: Versions) => [v.wordingVersion, v.termsVersion, v.privacyVersion].every(item => typeof item === 'string' && VERSION_FORMAT.test(item))
 
 const post = (endpoint: Endpoint, body: unknown, token?: string): Outgoing => ({
@@ -52,15 +48,20 @@ export function connectRequest(versions: Versions, addonVersion: string): Outgoi
     : undefined
 }
 
-// The offer list: anonymous. No token, no identifier, no cookie.
-export function catalogueRequest(etag?: string): Outgoing {
-  return { url: `${BASE_URL}catalogue`, method: 'GET', headers: isEtag(etag) ? { 'if-none-match': etag } : {} }
+// The offer list, format 2 (slots and campaigns): anonymous. No token, no
+// identifier, no cookie, and no header at all: not even If-None-Match, so
+// nothing the server chose earlier (its tag) is ever sent back to it
+// (finding 6 of the 2026-11-12 review). The request is the same for everyone.
+// From 0.21.0 this is the only list asked for; the format 1 address stays for
+// 0.20.2 until it ends.
+export function catalogueRequest(): Outgoing {
+  return { url: `${BASE_URL}catalogue2`, method: 'GET', headers: {} }
 }
 
 // A "Get code" press: which offer, and a fresh random key so a repeated press
 // cannot take two codes.
 export function claimRequest(token: string, campaignId: string, idempotencyKey: string): Outgoing | undefined {
-  return isToken(token) && CAMPAIGN_FORMAT.test(campaignId) && isUuid(idempotencyKey) ? post('claim', { campaignId, idempotencyKey }, token) : undefined
+  return isToken(token) && ID_FORMAT.test(campaignId) && isUuid(idempotencyKey) ? post('claim', { campaignId, idempotencyKey }, token) : undefined
 }
 
 export function withdrawRequest(token: string, versions: Versions): Outgoing | undefined {

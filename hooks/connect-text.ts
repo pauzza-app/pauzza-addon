@@ -1,70 +1,83 @@
 // Every word of the Connect step and the connected screens, in one file, so the
 // on-screen text can be changed without touching anything else. English only.
 //
-// The "legal" rows are Legal's "Test version 0.1" wording for the consent
-// screens (owner's decision, 2026-11-11): a plain card with one sentence, one
-// button and one acceptance line. Do not reword a legal row without Legal. The
-// "design" rows come from the Stage 2 design hand-over.
+// The "legal" rows are Legal's Stage B Connect card
+// (docs/legal/stage-b/connect-wording.md): one sentence, one button and one
+// acceptance line. Do not reword a legal row without Legal. The "design" rows
+// come from the Stage 2 design hand-over.
 //
-// BEFORE THE FIRST REAL OFFER: Legal's real-offer wording, documents and
-// versions replace these, and everyone connected must press "Connect" again.
+// ONE PRESS (owner, 2026-11-19): the Connect press is also the acceptance. It
+// accepts the Terms and Privacy Policy, confirms 18 or older, and connects.
+// There is no separate tick before it. The same card is the first screen, the
+// "Terms updated" notice and the card while accepted but not connected.
+//
+// Each line that is still rehearsal-only ends with the release check's marker
+// comment; addon/release-gate.mjs fails while any marker is left.
 
-// The last day of the test, as YYYY-MM-DD. THE OWNER SETS IT IN ONE PLACE:
-// "testEndDate" in `release.json`. The same date is in TERMS-REHEARSAL.md and
-// PRIVACY-REHEARSAL.md. While it is missing or not a real date the Connect card
-// is not offered at all. After that day the add-on disconnects by itself and
-// deletes what it received from the server.
-let endDate = ''
+// The last day of a rehearsal, as YYYY-MM-DD. THE OWNER SETS IT IN ONE PLACE:
+// "testEndDate" in `release.json`.
+// - Left out, or "": no end date (Stage B and after). Connect is offered, and
+//   nothing ends by a date.
+// - A real date: Connect is offered until the end of that day. After it the
+//   add-on disconnects by itself and deletes what it received from the server.
+// - Anything else (a placeholder such as "[TEST END DATE]", or a `release.json`
+//   that cannot be read or is not an object): Connect is not offered at all.
+let end: [number, number, number] | 'none' | 'unusable' = 'unusable'
 
-// Called once per session with the value read from `release.json`.
-export function setTestEndDate(date: unknown) {
-  endDate = typeof date === 'string' && date.length <= 30 ? date : ''
-}
-
-function endParts(): [number, number, number] | undefined {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(endDate)
+function endParts(date: unknown): [number, number, number] | undefined {
+  const match = typeof date === 'string' && date.length <= 30 ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(date) : null
 
   if (match === null) {
     return undefined
   }
 
   const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])]
-  const date = new Date(year, month - 1, day)
+  const parsed = new Date(year, month - 1, day)
 
-  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? [year, month, day] : undefined
+  return parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day ? [year, month, day] : undefined
+}
+
+// Called once per session with the value read from `release.json`.
+export function setTestEndDate(date: unknown) {
+  end = date === undefined || date === '' ? 'none' : (endParts(date) ?? 'unusable')
 }
 
 // The first moment after the test's last day, on this computer's clock; or
-// undefined while the date is not filled in.
+// undefined when there is no end date.
 export function testEndsAt(): number | undefined {
-  const parts = endParts()
-
-  return parts === undefined ? undefined : new Date(parts[0], parts[1] - 1, parts[2] + 1).getTime()
+  return Array.isArray(end) ? new Date(end[0], end[1] - 1, end[2] + 1).getTime() : undefined
 }
 
 export const isTestOver = (now: number) => {
-  const end = testEndsAt()
+  const endsAt = testEndsAt()
 
-  return end !== undefined && now >= end
+  return endsAt !== undefined && now >= endsAt
 }
 
-// May the Connect card be offered at all?
-export const canOfferConnect = (now: number) => endParts() !== undefined && !isTestOver(now)
+// May the Connect press connect at all?
+export const canOfferConnect = (now: number) => end !== 'unusable' && !isTestOver(now)
 
 // Sent to the server at the Connect press and kept in its receipt of the press.
-// Letters, digits, dots and dashes only, 20 characters at most. From Legal.
-export const CONNECT_WORDING_VERSION = 'stage-2-test-0.1'
-export const CONNECT_TERMS_VERSION = '0.1'
-export const CONNECT_PRIVACY_VERSION = '0.1'
+// Letters, digits, dots and dashes only, 20 characters at most. From Legal
+// (Stage B: wording stage-b-1, Terms 1.0, Privacy Policy 1.0).
+export const CONNECT_WORDING_VERSION = 'stage-b-1'
+export const CONNECT_TERMS_VERSION = '1.0'
+export const CONNECT_PRIVACY_VERSION = '1.0'
 
-// The two documents shown on the Connect card and while connected. They travel
-// with the add-on, copied byte for byte from Legal's rehearsal texts.
-export const CONNECT_DOCUMENTS = { terms: 'TERMS-REHEARSAL.md', privacy: 'PRIVACY-REHEARSAL.md' } as const
+// The two documents the Connect press accepts, shown on the card and in
+// Settings. They travel with the add-on, copied byte for byte from Legal's
+// Stage B texts (docs/legal/stage-b/terms.en.md and privacy.en.md).
+export const CONNECT_DOCUMENTS = { terms: 'TERMS.md', privacy: 'PRIVACY.md' } as const
 
 export const CONNECT_TEXT = {
-  // The Connect card. Nothing else goes on it.
+  // The Connect card: these rows, and nothing else.
   // legal: what happens
-  what: "Connect to Pauzza's server to get made-up test codes. Pauzza never reads your code, prompts or conversations.",
+  what: 'Connect to Pauzza to get offers and promo codes from partner shops. Pauzza never reads your code, prompts or conversations.',
+  // Under it, in place of the old first screen's "Pauzza sends nothing from
+  // your computer", a promise that stays true after Connect: Stage B Privacy
+  // Policy point 2, word for word. No usage number is ever sent (a limit
+  // prize says what its own "Get code" tells Pauzza). Legal to confirm.
+  figures: 'Your usage figures stay on your computer.',
   // legal: the button, alone
   connect: 'Connect',
   // legal: the line under the button, "By connecting you accept the [Terms]
@@ -75,6 +88,10 @@ export const CONNECT_TEXT = {
   acceptMiddle: 'and',
   privacy: 'Privacy Policy',
   acceptEnd: 'and confirm you are 18 or older.',
+  // Working text, Legal to confirm: the one extra line on the Connect card when
+  // it is back because the accepted texts changed (rehearsal Privacy point 9,
+  // Stage B Terms 13.1 and Privacy 9). Shown in that case only.
+  textsChanged: 'The texts have changed. To keep getting offers, read them and press Connect again. Codes you already have stay until their use-by date.',
   // legal: added to the "Pauzza is on" and "Delete" warnings while connected
   alsoDisconnects: 'This also disconnects Pauzza and deletes your install record on the server. Codes already claimed keep working until they expire.',
 
@@ -87,10 +104,12 @@ export const CONNECT_TEXT = {
   // 2b. design
   connectedTitle: 'Connected',
   connectedNote: "Offers and codes now come from Pauzza's server. You can disconnect at any time in ⚙.",
-  // legal: the marker above server-delivered test codes
-  testCodes: 'Test codes · not real offers',
-  // 2c. design: also used for a busy server
-  connectFailed: "Couldn't connect just now. Nothing was saved. Pauzza keeps working from its built-in samples.",
+  // the marker above server-delivered offers (Stage B)
+  offersLabel: 'Partner offers',
+  // 2c. design, reworded for the one press (review, 2026-11-19): after a failed
+  // press the acceptance is saved, so "Nothing was saved" no longer held. Also
+  // used for a busy server.
+  connectFailed: "Couldn't connect just now. Pauzza keeps working from its built-in samples; press Connect to try again.",
 
   // 3a, 3b. design
   hiddenCode: '••••••••',
@@ -109,7 +128,6 @@ export const CONNECT_TEXT = {
   noOffers: 'No offers right now',
   noOffersNote: 'Pauzza checks for new ones by itself, a few times a day. Codes you already claimed stay under Mine.',
   // 6. design
-  offlineSamples: "Can't reach Pauzza right now. You're seeing the built-in samples. It will try again later by itself.",
   offlineList: "Can't reach Pauzza right now. You're seeing the offers it last received. It will try again later by itself.",
   // Working text: beside an offer whose "Get code" press could not reach the server.
   claimOffline: "Can't reach Pauzza right now.",
@@ -118,7 +136,11 @@ export const CONNECT_TEXT = {
   // It carries the alsoDisconnects line above and the reference below.
   // design
   reference: 'Your reference',
-  referenceNote: 'Quote it if you write to us about your data.',
+  referenceNote: 'Quote it if you write to us.',
+  // The last line of Settings (owner, 2026-11-19: not beside the codes). Stage B Terms 5.3: claims go to
+  // the shop first; a person may also write to us, and we pass the claim on (the vendor outline: within
+  // 2 working days).
+  support: 'Problem with a code? Tell the shop first, or write to hello@pauzza.ge and we will pass it on.',
   // 7b. design
   disconnected: 'Disconnected',
   offersStopped: 'Offers have stopped.',

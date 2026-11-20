@@ -3,17 +3,21 @@
 
 import { expect, mock, test } from 'claude-code/testing'
 
+import { iconTileSvg } from '../hooks/art'
 import { acceptCatalogue, checkLink, validateCatalogue } from '../hooks/catalogue'
-import { CONNECT_PRIVACY_VERSION, CONNECT_TERMS_VERSION, CONNECT_TEXT, CONNECT_WORDING_VERSION, canOfferConnect, isTestOver, OFFER_POPUP, setTestEndDate } from '../hooks/connect-text'
+import { CONNECT_DOCUMENTS, CONNECT_PRIVACY_VERSION, CONNECT_TERMS_VERSION, CONNECT_TEXT, CONNECT_WORDING_VERSION, canOfferConnect, isTestOver, OFFER_POPUP, setTestEndDate } from '../hooks/connect-text'
 import {
   addCode,
   canSayNoneLeft,
   canUndo,
+  codesToKeep,
   connected,
   disconnect,
   FORGOTTEN_AFTER_MS,
   isConnected,
   isForgotten,
+  isFromNewerAddon,
+  isNewerCode,
   isWithdrawalDue,
   maskCode,
   newlyOpen,
@@ -21,16 +25,19 @@ import {
   readCodes,
   readConnection,
   readPopups,
+  retireChangedTexts,
   takePopup,
   undoDisconnect,
   withdrawalDone,
   withdrawalTried,
 } from '../hooks/connection'
-import { CONSENT_TEXT, TERMS_VERSION, WORDING_VERSION } from '../hooks/consent-text'
-import { UNDO_MS } from '../hooks/consent'
+import { CONSENT_TEXT, TERMS_EFFECTIVE, TERMS_VERSION, WORDING_VERSION } from '../hooks/consent-text'
+import { readConsent, UNDO_MS } from '../hooks/consent'
 import { isBuiltInPopup, offerLink } from '../hooks/display'
 import { decodePoint, verify } from '../hooks/ed25519'
 import { FIRST_RETRY_MS, MIN_GAP_MS } from '../hooks/fetch-schedule'
+import { SLOT_TEXT } from '../hooks/slot-text'
+import { LIST_FLOOR_KEY, MANUAL_GAP_MS, MANUAL_TRY_KEY, NONE_LEFT_KEY, readNoneLeft, TICK_MS } from '../hooks/server-link'
 import { ADDON_VERSION, BASE_URL, catalogueRequest, claimRequest, connectRequest, MAX_REPLY_CHARS, parseClaim, parseConnect, TIMEOUT_MS, withdrawRequest } from '../hooks/server'
 import { signBytes, signCatalogue, testKey } from './signing'
 
@@ -50,28 +57,31 @@ const REF = '7KQ2M9XH4D'
 const CLAIM_ID = '11111111-2222-4333-8444-555555555555'
 const VERSIONS = { wordingVersion: CONNECT_WORDING_VERSION, termsVersion: CONNECT_TERMS_VERSION, privacyVersion: CONNECT_PRIVACY_VERSION }
 
+// Format 2 lists carry no merchant, code type or budget, only the sealed fingerprint of them (the
+// server checks it; the add-on checks only its shape).
+const DIGEST = 'ab'.repeat(32)
 const campaign = (id: string, fields: Record<string, unknown> = {}) => ({
   id,
-  codeModel: 'list',
   opensAt: iso(NINE_AM - HOUR),
   claimBy: iso(NINE_AM + 2 * DAY),
   useBy: iso(NINE_AM + 5 * DAY),
   minInstallAgeSeconds: 0,
-  hourlyBudget: 5,
-  totalBudget: 5,
   ...fields,
 })
 const offer = (id: string, fields: Record<string, unknown> = {}, campaignFields: Record<string, unknown> = {}) => ({
   id,
-  merchantId: 'mock',
   brand: 'Mock Pizza',
   text: '15% off a mock pizza',
   category: 'food',
   campaign: campaign(`${id}-c1`, campaignFields),
   ...fields,
 })
+// Format 2: the only list 0.21.0 asks for. No slot or campaign here; those
+// are in slots.test.tsx.
 const catalogue = (fields: Record<string, unknown> = {}) => ({
-  v: 1,
+  v: 2,
+  latestAddonVersion: '0.21.0',
+  events: [],
   seq: 1,
   issuedAt: iso(NINE_AM - MINUTE),
   expiresAt: iso(NINE_AM + 10 * DAY),
@@ -79,8 +89,9 @@ const catalogue = (fields: Record<string, unknown> = {}) => ({
   allowedLinkHosts: ['shop.example'],
   categories: [{ id: 'food', label: 'Food' }, { id: 'drinks', label: 'Drinks' }],
   offers: [offer('mock-pizza'), offer('mock-juice', { brand: 'Mock Juice', text: 'A free mock juice', category: 'drinks', link: 'https://shop.example/juice' })],
-  schedule: { timeZone: 'Asia/Tbilisi', dailyOfferOpens: '12:00', firstPresentAfterSeconds: 15 },
+  schedule: { dailyOfferOpens: '12:00' },
   popupRules: [{ id: 'daily', template: 'daily-offer', maxPerDay: 1 }],
+  privateDigest: DIGEST,
   ...fields,
 })
 
@@ -126,7 +137,7 @@ test('Ed25519: malformed keys and signatures are refused without throwing', asyn
 const accept = async (text: unknown, over: Record<string, unknown> = {}) => {
   const key = await testKey(7)
 
-  return acceptCatalogue(text, { pinnedKeys: { 'test-1': key.publicKey }, lastSeq: 0, now: NINE_AM, addonVersion: '0.20.0', ...over })
+  return acceptCatalogue(text, { pinnedKeys: { 'test-1': key.publicKey }, lastSeq: 0, now: NINE_AM, addonVersion: '0.20.0', format: 2, ...over })
 }
 const signed = async (data: unknown, keyId = 'test-1', seed = 7) => signCatalogue(await testKey(seed), data, keyId)
 const reasonOf = async (data: unknown) => {
@@ -172,7 +183,7 @@ test('signed list: a bad, missing, foreign or mismatched signature is refused', 
   // The bare list, with no envelope at all.
   expect(await reason(good.payload)).toBe('envelope')
   // No trusted keys in the release: everything is refused.
-  expect((await acceptCatalogue(JSON.stringify(good), { pinnedKeys: {}, lastSeq: 0, now: NINE_AM, addonVersion: '0.20.0' })).ok).toBe(false)
+  expect((await acceptCatalogue(JSON.stringify(good), { pinnedKeys: {}, lastSeq: 0, now: NINE_AM, addonVersion: '0.20.0', format: 2 })).ok).toBe(false)
 })
 
 test('signed list: anything that is not a small JSON envelope is refused without throwing', async () => {
@@ -242,12 +253,17 @@ const WRONG_SHAPES: Record<string, unknown> = {
   'more than 200 offers': catalogue({ offers: Array.from({ length: 201 }, (_, i) => offer(`o${i}`)) }),
   'a campaign with an unknown field': catalogue({ offers: [offer('a', {}, { url: 'https://evil.example' })] }),
   'a campaign that ends before it opens': catalogue({ offers: [offer('a', {}, { claimBy: iso(NINE_AM - 2 * HOUR) })] }),
-  'a campaign with a zero budget': catalogue({ offers: [offer('a', {}, { totalBudget: 0 })] }),
-  'a campaign with a text budget': catalogue({ offers: [offer('a', {}, { hourlyBudget: '5' })] }),
+  'a campaign carrying its total budget (kept on the server)': catalogue({ offers: [offer('a', {}, { totalBudget: 5 })] }),
+  'a campaign carrying its hourly budget (kept on the server)': catalogue({ offers: [offer('a', {}, { hourlyBudget: 5 })] }),
   'a campaign with a negative wait': catalogue({ offers: [offer('a', {}, { minInstallAgeSeconds: -1 })] }),
-  'a campaign with an unknown code model': catalogue({ offers: [offer('a', {}, { codeModel: 'remote' })] }),
-  'a schedule in another time zone': catalogue({ schedule: { timeZone: 'UTC', dailyOfferOpens: '12:00', firstPresentAfterSeconds: 15 } }),
-  'a schedule with an impossible time': catalogue({ schedule: { timeZone: 'Asia/Tbilisi', dailyOfferOpens: '25:00', firstPresentAfterSeconds: 15 } }),
+  'a campaign carrying its code type (kept on the server)': catalogue({ offers: [offer('a', {}, { codeModel: 'list' })] }),
+  'an offer carrying its merchant (kept on the server)': catalogue({ offers: [offer('a', { merchantId: 'mock' })] }),
+  'a schedule with a time zone': catalogue({ schedule: { timeZone: 'Asia/Tbilisi', dailyOfferOpens: '12:00' } }),
+  'a schedule with a first-present wait': catalogue({ schedule: { dailyOfferOpens: '12:00', firstPresentAfterSeconds: 15 } }),
+  'a schedule with an impossible time': catalogue({ schedule: { dailyOfferOpens: '25:00' } }),
+  'a list with no sealed fingerprint': catalogue({ privateDigest: undefined }),
+  'a list whose fingerprint is in capitals': catalogue({ privateDigest: 'AB'.repeat(32) }),
+  'a list whose fingerprint is too short': catalogue({ privateDigest: 'a'.repeat(63) }),
   'a pop-up rule that carries text': catalogue({ popupRules: [{ id: 'daily', template: 'daily-offer', maxPerDay: 1, text: 'Click here' }] }),
   'a pop-up rule naming an unknown line': catalogue({ popupRules: [{ id: 'daily', template: 'Free money · run this', maxPerDay: 1 }] }),
   'a pop-up rule with too many a day': catalogue({ popupRules: [{ id: 'daily', template: 'daily-offer', maxPerDay: 50 }] }),
@@ -329,10 +345,35 @@ test('signed list: a link must be https, on the signed host list, with no user n
 
   expect(await reasonOf(catalogue({ offers: [offer('a', { link: 'https://evil.example/a' })] }))).toMatch(/^schema/)
   expect(await reasonOf(catalogue({ allowedLinkHosts: ['xn--shp-fma.example'] }))).toMatch(/^schema/)
-  // The add-on's own link carries only the offer's id, on the one built-in address.
-  expect(offerLink('mock-juice')).toBe(`${BASE_URL}o/mock-juice`)
-  expect(offerLink('../connect')).toBe(undefined)
-  expect(offerLink('a?to=https://evil.example')).toBe(undefined)
+  // The link opened is the signed one itself, exactly as signed, with its host to show beside it
+  // (finding 4 of the 2026-11-12 review). Pauzza's own address is never in it.
+  expect(offerLink('https://shop.example/juice', hosts)).toEqual({ href: 'https://shop.example/juice', host: 'shop.example' })
+  expect(offerLink('https://shop.example', hosts)).toEqual({ href: 'https://shop.example', host: 'shop.example' })
+  expect(offerLink('https://shop.example/a-b_c.d~e/?x=1&y=%20#top', hosts)).toEqual({ href: 'https://shop.example/a-b_c.d~e/?x=1&y=%20#top', host: 'shop.example' })
+
+  for (const url of bad) {
+    expect(offerLink(url, hosts)).toBe(undefined)
+  }
+
+  // A host that is not on the list's signed hosts: no link.
+  expect(offerLink('https://other.example/a', hosts)).toBe(undefined)
+  expect(offerLink('https://shop.example/a', [])).toBe(undefined)
+  expect(offerLink(`${BASE_URL}o/mock-juice`, hosts)).toBe(undefined)
+  // Anything a browser would have to encode first: no link, so what opens is exactly what was signed.
+  for (const url of ['https://shop.example/a"b', 'https://shop.example/a`b', 'https://shop.example/a<b>', 'https://shop.example/a{b}', 'https://shop.example/a|b', 'https://shop.example/a^b', 'https://shop.example/café', 'https://shop.example/a[0]']) {
+    expect(checkLink(url, hosts)).toBe('shop.example')
+    expect(offerLink(url, hosts)).toBe(undefined)
+  }
+
+  // The same character rule as the signing check (server/supabase/functions/_shared/catalogue.ts, LINK_CHARS):
+  // no quote, dollar, bracket, semicolon, bang or star, and % only before two hex digits.
+  for (const url of ["https://shop.example/a'b", 'https://shop.example/a$b', 'https://shop.example/a(b)', 'https://shop.example/a;b', 'https://shop.example/a!', 'https://shop.example/a*', 'https://shop.example/100%', 'https://shop.example/a%2', 'https://shop.example/a%G0']) {
+    expect(offerLink(url, hosts)).toBe(undefined)
+  }
+
+  for (const url of ['https://shop.example/a%2Fb%c3%A9', 'https://shop.example/@brand/deal?ref=pauzza&x=1+2,3#top']) {
+    expect(offerLink(url, hosts)).toEqual({ href: url, host: 'shop.example' })
+  }
 })
 
 // ---------------------------------------------------------------- what is sent, and what is accepted back
@@ -344,15 +385,14 @@ test('requests: one built-in https address, and only the fields the server desig
   const list = catalogueRequest()
 
   expect(BASE_URL).toBe('https://pwchzyltlirhiiaxoifb.supabase.co/functions/v1/')
-  expect([connect.url, claim.url, withdraw.url, list.url]).toEqual([`${BASE_URL}connect`, `${BASE_URL}claim`, `${BASE_URL}withdraw`, `${BASE_URL}catalogue`])
+  expect([connect.url, claim.url, withdraw.url, list.url]).toEqual([`${BASE_URL}connect`, `${BASE_URL}claim`, `${BASE_URL}withdraw`, `${BASE_URL}catalogue2`])
 
   // Connect: no token, no identifier of any kind.
-  expect(JSON.parse(connect.body!)).toEqual({ ...VERSIONS, addonVersion: '0.20.2' })
+  expect(JSON.parse(connect.body!)).toEqual({ ...VERSIONS, addonVersion: '0.21.0' })
   expect(Object.keys(connect.headers)).toEqual(['content-type'])
   // The offer list: anonymous. No token, no body, no query.
-  expect(list).toEqual({ url: `${BASE_URL}catalogue`, method: 'GET', headers: {} })
-  expect(catalogueRequest(`"${'a'.repeat(64)}"`).headers).toEqual({ 'if-none-match': `"${'a'.repeat(64)}"` })
-  expect(catalogueRequest('"><script>').headers).toEqual({})
+  // No If-None-Match either: nothing the server chose earlier goes back to it (finding 6).
+  expect(list).toEqual({ url: `${BASE_URL}catalogue2`, method: 'GET', headers: {} })
   // A claim: the offer and a fresh key. The token rides only in the header.
   expect(JSON.parse(claim.body!)).toEqual({ campaignId: 'mock-pizza-c1', idempotencyKey: CLAIM_ID })
   expect(claim.headers.authorization).toBe(`Bearer ${TOKEN}`)
@@ -373,7 +413,7 @@ test('requests: one built-in https address, and only the fields the server desig
   expect(withdrawRequest('short', VERSIONS)).toBe(undefined)
   // The versions sent fit the server's own pattern.
   expect(Object.values(VERSIONS).every(item => /^[0-9A-Za-z.-]{1,20}$/.test(item))).toBe(true)
-  expect(ADDON_VERSION).toBe('0.20.2')
+  expect(ADDON_VERSION).toBe('0.21.0')
 })
 
 const reply = (status: number, body: unknown, headers: Record<string, string> = {}) => ({ status, text: typeof body === 'string' ? body : JSON.stringify(body), headers })
@@ -500,6 +540,120 @@ test('connection record: disconnecting stops at once, can be undone for 10 secon
   expect(isForgotten(linked(), NINE_AM + FORGOTTEN_AFTER_MS + DAY)).toBe(true)
 })
 
+// Saved Connect presses made under other texts than this version ships.
+const OLDER_TEXTS: Record<string, unknown> = {
+  wording: { ...VERSIONS, wordingVersion: 'stage-2-test-0.0' },
+  Terms: { ...VERSIONS, termsVersion: '0.0' },
+  'Privacy Policy': { ...VERSIONS, privacyVersion: '0.0' },
+  'no readable versions': undefined,
+}
+
+test('connection record: a Connect press under other texts is not a connection; it is withdrawn at once, with no undo time', () => {
+  const now = NINE_AM + HOUR
+  const current = readConnection(JSON.parse(JSON.stringify(linked())))
+
+  // The same texts: nothing changes.
+  expect(retireChangedTexts(current, now)).toBe(current)
+  expect(current.textsChanged).toBe(false)
+  // A normal disconnect is not a change of texts.
+  expect(disconnect(current, now).textsChanged).toBe(false)
+
+  for (const versions of Object.values(OLDER_TEXTS)) {
+    const record = readConnection({ ...JSON.parse(JSON.stringify(linked())), versions })
+    const retired = retireChangedTexts(record, now)
+
+    expect(isConnected(record)).toBe(false)
+    expect(retired.status).toBe('withdrawn')
+    expect(retired.token).toBe(null)
+    expect(retired.textsChanged).toBe(true)
+    // Sent with the old install's own token and versions, at once.
+    expect(retired.withdrawal?.token).toBe(TOKEN)
+    expect(retired.withdrawal?.versions).toEqual(versions ?? VERSIONS)
+    expect(canUndo(retired, now)).toBe(false)
+    expect(undoDisconnect(retired, now)).toBe(retired)
+    expect(isWithdrawalDue(retired, now)).toBe(true)
+    expect(retireChangedTexts(retired, now)).toBe(retired)
+
+    // The reason outlasts the server's answer, and holds nothing about the person.
+    const done = readConnection(JSON.parse(JSON.stringify(withdrawalDone(retired))))
+    expect(done.textsChanged).toBe(true)
+    expect(JSON.stringify(done)).not.toContain(TOKEN)
+
+    // A new Connect press clears it.
+    const again = connected(done, { token: TOKEN, publicRef: REF, firstSeenAt: now }, now)
+    expect(isConnected(again)).toBe(true)
+    expect(again.versions).toEqual(VERSIONS)
+    expect(again.textsChanged).toBe(false)
+  }
+
+  // Only a withdrawn record can carry the reason.
+  expect(readConnection({ status: 'none', textsChanged: true }).textsChanged).toBe(false)
+  expect(readConnection({ status: 'withdrawn', textsChanged: 'yes' }).textsChanged).toBe(false)
+})
+
+test('connection record: no Undo after a change of texts, even when the clock read for the panel is earlier', () => {
+  const record = readConnection({ ...JSON.parse(JSON.stringify(linked())), versions: OLDER_TEXTS.wording })
+  const retired = retireChangedTexts(record, NINE_AM + HOUR)
+
+  // The panel's own clock read came a moment before the one that retired the record.
+  for (const earlier of [1, SECOND, 5 * SECOND, UNDO_MS - 1]) {
+    expect(canUndo(retired, NINE_AM + HOUR - earlier)).toBe(false)
+    expect(undoDisconnect(retired, NINE_AM + HOUR - earlier)).toBe(retired)
+  }
+
+  // An ordinary disconnect keeps its undo time.
+  expect(canUndo(disconnect(linked(), NINE_AM + HOUR), NINE_AM + HOUR + SECOND)).toBe(true)
+})
+
+test('connection record: a press made by a newer add-on under other texts is left alone; an older or unknown one is retired', () => {
+  const now = NINE_AM + HOUR
+  const press = (fields: Record<string, unknown>) => readConnection({ ...JSON.parse(JSON.stringify(linked())), ...fields })
+
+  // A new Connect saves the add-on version that made it.
+  expect(linked().addonVersion).toBe(ADDON_VERSION)
+  expect(readConnection(JSON.parse(JSON.stringify(linked()))).addonVersion).toBe(ADDON_VERSION)
+
+  for (const newer of ['0.21.1', '0.22.0', '1.0.0']) {
+    const record = press({ versions: OLDER_TEXTS.Terms, addonVersion: newer })
+
+    expect(isFromNewerAddon(record)).toBe(true)
+    expect(isConnected(record)).toBe(false)
+    expect(retireChangedTexts(record, now)).toBe(record)
+    // Switching off is the person's own request: it still disconnects.
+    expect(disconnect(record, now).withdrawal?.token).toBe(TOKEN)
+  }
+
+  // Older, the same, missing (0.20.2 saved none) or unreadable: retired.
+  for (const older of ['0.20.2', ADDON_VERSION, undefined, 'newest', '9.9']) {
+    const record = press({ versions: OLDER_TEXTS.Terms, addonVersion: older })
+
+    expect(isFromNewerAddon(record)).toBe(false)
+    expect(retireChangedTexts(record, now).textsChanged).toBe(true)
+  }
+
+  // A newer add-on with the same texts: simply connected.
+  const same = press({ addonVersion: '0.22.0' })
+  expect(isConnected(same)).toBe(true)
+  expect(isFromNewerAddon(same)).toBe(false)
+})
+
+test('connection record: versions the withdrawal request could not carry are replaced, so the withdrawal is never dropped', () => {
+  for (const versions of [{ ...VERSIONS, wordingVersion: 'has spaces' }, { ...VERSIONS, termsVersion: 'x'.repeat(30) }, { ...VERSIONS, privacyVersion: 'ქ' }, undefined, 'junk']) {
+    const record = readConnection({ ...JSON.parse(JSON.stringify(linked())), versions })
+
+    for (const made of [retireChangedTexts(record, NINE_AM), disconnect(record, NINE_AM)]) {
+      expect(made.withdrawal?.token).toBe(TOKEN)
+      expect(withdrawRequest(made.withdrawal!.token, made.withdrawal!.versions)).toBeDefined()
+    }
+
+    expect(retireChangedTexts(record, NINE_AM).withdrawal?.versions).toEqual(VERSIONS)
+    // A saved waiting withdrawal with such versions is still sent.
+    const saved = readConnection({ status: 'withdrawn', withdrawal: { token: TOKEN, versions, at: NINE_AM } })
+    expect(saved.withdrawal?.versions).toEqual(VERSIONS)
+    expect(withdrawRequest(saved.withdrawal!.token, saved.withdrawal!.versions)).toBeDefined()
+  }
+})
+
 const signedOffer = offer('mock-pizza') as any
 const held = (fields: Record<string, unknown> = {}) => ({ claimId: CLAIM_ID, campaignId: 'mock-pizza-c1', brand: 'Mock Pizza', text: '15% off a mock pizza', code: 'PAUZZA-0042', useBy: NINE_AM + 5 * DAY, claimedAt: NINE_AM, ...fields })
 
@@ -529,6 +683,50 @@ test('codes: a replayed code or claim is refused, and the signed use-by date win
   // A reply cannot stretch the life of a code past the signed date.
   expect(addCode([], signedOffer, { claimId: CLAIM_ID, code: 'PAUZZA-0042', useBy: NINE_AM + 400 * DAY }, NINE_AM)![0].useBy).toBe(NINE_AM + 5 * DAY)
   expect(addCode([], signedOffer, { claimId: CLAIM_ID, code: 'PAUZZA-0042', useBy: NINE_AM + DAY }, NINE_AM)![0].useBy).toBe(NINE_AM + DAY)
+})
+
+// Texts a newer add-on ships, and codes saved under its connection and under this version's.
+const NEWER_TEXTS = { wordingVersion: 'stage-b-1.0', termsVersion: '1.0', privacyVersion: '1.0' }
+const DECEMBER_20 = new Date(2026, 11, 20).getTime()
+const NEWER_CODE = held({ claimId: '31111111-2222-4333-8444-555555555555', campaignId: 'real-pizza-c1', code: 'REAL-0001', useBy: DECEMBER_20, claimedUnder: { ...NEWER_TEXTS, addonVersion: '0.22.0' } })
+const OURS_CODE = held({ claimId: '41111111-2222-4333-8444-555555555555', campaignId: 'mock-juice-c1', code: 'PAUZZA-0043', useBy: DECEMBER_20, claimedUnder: { ...VERSIONS, addonVersion: '0.21.0' } })
+
+test("codes: each is marked with the connection it was claimed under; a newer add-on's codes are never read or deleted here", () => {
+  // A claim saves the mark, and it reads back.
+  const under = { ...VERSIONS, addonVersion: ADDON_VERSION }
+  const added = addCode([], signedOffer, { claimId: CLAIM_ID, code: 'PAUZZA-0042', useBy: NINE_AM + 5 * DAY }, NINE_AM, under)!
+  expect(added[0].claimedUnder).toEqual(under)
+  expect(readCodes(JSON.parse(JSON.stringify(added)), NINE_AM)).toEqual(added)
+
+  // Only a newer add-on under other texts owns a code. Unmarked, this version's,
+  // an older or unknown version, the same texts, or a broken mark: this version's.
+  expect(isNewerCode(NEWER_CODE)).toBe(true)
+  for (const item of [
+    held(),
+    OURS_CODE,
+    held({ claimedUnder: { ...NEWER_TEXTS, addonVersion: '0.21.0' } }),
+    held({ claimedUnder: { ...NEWER_TEXTS, addonVersion: null } }),
+    held({ claimedUnder: { ...NEWER_TEXTS, addonVersion: 'newest' } }),
+    held({ claimedUnder: { ...VERSIONS, addonVersion: '0.22.0' } }),
+    held({ claimedUnder: 'junk' }),
+    null,
+    42,
+  ]) {
+    expect(isNewerCode(item)).toBe(false)
+  }
+
+  // A newer add-on's code is never read here, so never shown or counted.
+  expect(readCodes([held(), OURS_CODE, NEWER_CODE], NINE_AM).map(item => item.code)).toEqual(['PAUZZA-0042', 'PAUZZA-0043'])
+
+  // Before the test end: this version's expired codes go; a newer add-on's stay
+  // exactly as saved, even one this version could not read.
+  const strange = { ...NEWER_CODE, code: 'a shape this version refuses', useBy: 'later' }
+  expect(codesToKeep([held(), OURS_CODE, NEWER_CODE, strange], NINE_AM, false)).toEqual([held(), OURS_CODE, NEWER_CODE, strange])
+  expect(codesToKeep([held(), NEWER_CODE], NINE_AM + 6 * DAY, false)).toEqual([NEWER_CODE])
+  // At the test end: every code of this version goes, marked or not; a newer add-on's stay.
+  expect(codesToKeep([held(), OURS_CODE, NEWER_CODE, strange], NINE_AM, true)).toEqual([NEWER_CODE, strange])
+  expect(codesToKeep([held(), OURS_CODE], NINE_AM, true)).toEqual([])
+  expect(codesToKeep('junk', NINE_AM, true)).toEqual([])
 })
 
 test('codes: the mask shows the last four at most, and nothing of a short code', () => {
@@ -591,21 +789,40 @@ test('pop-ups: the signed list sets how many a day and picks a built-in line; it
 
 // ---------------------------------------------------------------- the wording
 
-test("wording: the Connect card carries Legal's test version 0.1 rows unchanged, and nothing else", () => {
-  expect(CONNECT_TEXT.what).toBe("Connect to Pauzza's server to get made-up test codes. Pauzza never reads your code, prompts or conversations.")
+test("wording: the Connect card carries Legal's Stage B rows unchanged, plus the usage-figures line, and nothing else", () => {
+  expect(CONNECT_TEXT.what).toBe('Connect to Pauzza to get offers and promo codes from partner shops. Pauzza never reads your code, prompts or conversations.')
+  // Stage B Privacy Policy, point 2, word for word.
+  expect(CONNECT_TEXT.figures).toBe('Your usage figures stay on your computer.')
   expect(CONNECT_TEXT.connect).toBe('Connect')
   expect(`${CONNECT_TEXT.acceptStart} [${CONNECT_TEXT.terms}] ${CONNECT_TEXT.acceptMiddle} [${CONNECT_TEXT.privacy}] ${CONNECT_TEXT.acceptEnd}`).toBe(
     'By connecting you accept the [Terms] and [Privacy Policy] and confirm you are 18 or older.',
   )
-  expect(CONNECT_TEXT.testCodes).toBe('Test codes · not real offers')
+  expect(CONNECT_TEXT.offersLabel).toBe('Partner offers')
   expect(CONNECT_TEXT.alsoDisconnects).toBe('This also disconnects Pauzza and deletes your install record on the server. Codes already claimed keep working until they expire.')
-  expect([CONNECT_WORDING_VERSION, CONNECT_TERMS_VERSION, CONNECT_PRIVACY_VERSION]).toEqual(['stage-2-test-0.1', '0.1', '0.1'])
+  expect([CONNECT_WORDING_VERSION, CONNECT_TERMS_VERSION, CONNECT_PRIVACY_VERSION]).toEqual(['stage-b-1', '1.0', '1.0'])
+  // The local acceptance names the same two documents: raising either Connect version raises it too.
+  expect(TERMS_VERSION).toBe(`terms-${CONNECT_TERMS_VERSION}-privacy-${CONNECT_PRIVACY_VERSION}`)
+  // After a failed one press the acceptance is saved, so the line does not say "nothing was saved".
+  expect(CONNECT_TEXT.connectFailed).toBe("Couldn't connect just now. Pauzza keeps working from its built-in samples; press Connect to try again.")
+  // The Connect press is the acceptance: the two documents it opens are the Stage B texts, bundled under the plain names.
+  expect(CONNECT_DOCUMENTS).toEqual({ terms: 'TERMS.md', privacy: 'PRIVACY.md' })
+  // Only when the card is back because the accepted texts changed.
+  expect(CONNECT_TEXT.textsChanged).toBe('The texts have changed. To keep getting offers, read them and press Connect again. Codes you already have stay until their use-by date.')
   // No "Not now", no consent paragraph, no sentence about other countries.
   expect(Object.values(CONNECT_TEXT).filter(item => typeof item === 'string' && /not now|i agree|weaker protection|prize|reward|hurry/i.test(item))).toEqual([])
 })
 
-test('wording: with no end date set, the Connect card cannot be offered; after the date, it is over', () => {
-  for (const unset of ['[TEST END DATE]', '', undefined, 42, '30 November 2026', '2026-13-40', '2026-02-30']) {
+test('wording: with no end date, Connect is offered and nothing ends by a date; a value that is not a date offers no Connect; after a real date, it is over', () => {
+  // No end date (Stage B): missing or empty.
+  for (const none of [undefined, '']) {
+    setTestEndDate(none)
+    expect(canOfferConnect(NINE_AM)).toBe(true)
+    expect(canOfferConnect(NINE_AM + 400 * DAY)).toBe(true)
+    expect(isTestOver(NINE_AM + 400 * DAY)).toBe(false)
+  }
+
+  // Unfinished or broken: never offered, never over.
+  for (const unset of ['[TEST END DATE]', 42, null, '30 November 2026', '2026-13-40', '2026-02-30', 'x'.repeat(40)]) {
     setTestEndDate(unset)
     expect(canOfferConnect(NINE_AM)).toBe(false)
     expect(isTestOver(NINE_AM + 400 * DAY)).toBe(false)
@@ -638,7 +855,8 @@ const BUILT_IN = JSON.stringify({
 type Sent = { url: string; method: string; headers: Record<string, string>; body: string | undefined }
 type Route = (request: Sent) => unknown
 
-async function engine(on: any, options: { now?: number; consent?: unknown; saved?: unknown; store?: Record<string, unknown>; endDate?: string; keys?: Record<string, string> } = {}) {
+// `endDate: null` leaves the end date out of `release.json` altogether.
+async function engine(on: any, options: { now?: number; consent?: unknown; saved?: unknown; store?: Record<string, unknown>; endDate?: string | null; keys?: Record<string, string> } = {}) {
   const key = await testKey(7)
   const clock = mock.clock(on, { now: options.now ?? NINE_AM })
   const store = new Map<string, unknown>([['saved', options.saved ?? SAVED]])
@@ -658,9 +876,11 @@ async function engine(on: any, options: { now?: number; consent?: unknown; saved
   const copied: string[] = []
   const lines: unknown[] = []
   const reads: string[] = []
+  // How often the usage figures were read.
+  const calls = { usage: 0 }
   const good = {
     connect: () => reply(201, CONNECT_BODY),
-    catalogue: async () => reply(200, await signCatalogue(key, catalogue()), { etag: `"${'ab'.repeat(32)}"` }),
+    catalogue2: async () => reply(200, await signCatalogue(key, catalogue()), { etag: `"${'ab'.repeat(32)}"` }),
     claim: () => reply(200, CLAIM_BODY),
     withdraw: () => reply(200, { ok: true }),
   }
@@ -692,15 +912,27 @@ async function engine(on: any, options: { now?: number; consent?: unknown; saved
     reads.push(name)
 
     if (name === 'release.json') {
-      return { value: JSON.stringify({ testEndDate: options.endDate ?? END_DATE, catalogueKeys: options.keys ?? { 'test-1': key.publicKey } }) }
+      const end = options.endDate === null ? {} : { testEndDate: options.endDate ?? END_DATE }
+
+      return { value: JSON.stringify({ ...end, catalogueKeys: options.keys ?? { 'test-1': key.publicKey } }) }
     }
 
     return { value: name.endsWith('.md') ? `DOC ${name}` : BUILT_IN }
   })
   on('ui.invalidate', () => ({ value: undefined }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  // What the panel asked for each time it was opened.
+  const opens: unknown[] = []
+  on('ui.open', (_: unknown, e: unknown) => {
+    opens.push(e)
+
+    return { value: { isPlaced: true } }
+  })
   on('ui.close', () => ({ value: undefined }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [] } }))
+  on('session.usage', () => {
+    calls.usage += 1
+
+    return { value: { startedAt: 0, context: {}, rateLimits: [] } }
+  })
   on('ui.status', (_: unknown, e: any) => {
     lines.push(e.text)
 
@@ -737,23 +969,25 @@ async function engine(on: any, options: { now?: number; consent?: unknown; saved
     }
   }
 
-  return { clock, store, sent, times, toasts, copied, lines, reads, routes, good, key, paths, walk }
+  return { clock, store, sent, times, toasts, copied, lines, reads, routes, good, key, paths, walk, calls, opens }
 }
 
 let lastClock: { settle: () => Promise<void> } | undefined
 
 const CONNECTED = { status: 'connected', token: TOKEN, publicRef: REF, firstSeenAt: NINE_AM - DAY, lastContactAt: NINE_AM - DAY, versions: VERSIONS, at: NINE_AM - DAY, withdrawal: null, history: [] }
 // The first look at the schedule is started, not awaited, by the add-on: let it finish.
-const start = async ($: any) => {
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-
-  // The signature check hashes off the event loop, so give it real moments too.
+// The signature check hashes off the event loop, so give it real moments too.
+const settle = async () => {
   for (let i = 0; i < 3; i += 1) {
     await lastClock?.settle()
     await new Promise(resolve => setTimeout(resolve, 15))
   }
 
   await lastClock?.settle()
+}
+const start = async ($: any) => {
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await settle()
 }
 const mount = ($: any, surface: 'terminal' | 'desktop' = 'terminal') => $.ui.mount({ ...PANE, surface })
 // Closing and opening the panel again: `/pauzza` is how it is opened.
@@ -805,23 +1039,39 @@ async function hasKey($: any, key: string, surface: 'terminal' | 'desktop' = 'te
 
 const stage = (name: string, body: ($: any, on: any) => Promise<void>) => test(name, { timeoutMs: 180_000 }, body)
 
-// Every button a person could press, except the Connect press itself.
+// Every button a person could press, except the Connect press itself. Since the
+// one press (owner, 2026-11-19) there is no separate acceptance tick: the
+// Connect press is the acceptance.
 const OTHER_KEYS = [
-  'consent-later', 'open-terms', 'document-back', 'open-privacy', 'document-back', 'consent-tick', 'connect-privacy', 'document-back', 'connect-terms', 'document-back',
+  'consent-later', 'open-terms', 'document-back', 'open-privacy', 'document-back', 'connect-privacy', 'document-back', 'connect-terms', 'document-back',
   'drawer-food', 'copy-test-pizza', 'drawer-mine', 'drawer-day', 'meter-change', 'carousel-next', 'carousel-choose', 'settings-toggle', 'display-ready', 'popups-off',
   'reset', 'reset-cancel', 'settings-back', 'settings-toggle', 'reset', 'reset-confirm', 'consent-untick', 'consent-undo',
 ]
 
-const BEFORE_CONNECT: Record<string, { consent?: unknown; store?: Record<string, unknown>; endDate?: string }> = {
+// The day the Stage B texts apply (TERMS_EFFECTIVE), at 09:00 on this computer's clock.
+const EFFECTIVE_NINE_AM = (() => {
+  const [year, month, day] = TERMS_EFFECTIVE.split('-').map(Number)
+
+  return new Date(year, month - 1, day, 9, 0).getTime()
+})()
+// An acceptance of the earlier separate tick, saved by 0.20.2 and before.
+const OLD_TICK = { status: 'given', termsVersion: 'local-1', wordingVersion: 'stage-1.4-en', at: NINE_AM - 5 * DAY, history: [{ event: 'given', termsVersion: 'local-1', wordingVersion: 'stage-1.4-en', at: NINE_AM - 5 * DAY }] }
+
+const BEFORE_CONNECT: Record<string, { now?: number; consent?: unknown; store?: Record<string, unknown>; endDate?: string | null }> = {
   'never asked': { consent: undefined },
+  'never asked, a build with no end date': { consent: undefined, endDate: '' },
   'Terms declined': { consent: { status: 'declined', at: NINE_AM - DAY, termsVersion: null, wordingVersion: WORDING_VERSION } },
   'Pauzza switched off': { consent: { ...GIVEN, status: 'withdrawn', at: NINE_AM - DAY } },
   'Pauzza switched off, inside its undo time': { consent: { ...GIVEN, status: 'withdrawn', at: NINE_AM - SECOND, deletePending: true } },
   'Terms accepted, Connect card showing': {},
-  'Terms accepted, Connect card showing, no end date set': { endDate: '[TEST END DATE]' },
+  'Terms accepted, Connect card showing, a build with no end date': { endDate: null },
+  'Terms accepted, a placeholder end date': { endDate: '[TEST END DATE]' },
   'Terms accepted, "Not now" saved by the earlier version': { store: { connection: { status: 'declined', at: NINE_AM - DAY } } },
   'Terms accepted, disconnected earlier': { store: { connection: { status: 'withdrawn', at: NINE_AM - DAY, withdrawal: null } } },
   'updated Terms not yet accepted': { consent: { ...GIVEN, termsVersion: 'older' } },
+  'updated Terms not yet accepted, after they apply': { now: EFFECTIVE_NINE_AM, consent: { ...GIVEN, termsVersion: 'older' } },
+  'the old tick accepted, never connected': { consent: OLD_TICK },
+  'the old tick accepted, never connected, after the Stage B texts apply': { now: EFFECTIVE_NINE_AM, consent: OLD_TICK },
   'a saved record that claims a connection but has no token': { store: { connection: { status: 'connected', publicRef: REF, firstSeenAt: NINE_AM } } },
   'a saved record with a malformed token': { store: { connection: { ...CONNECTED, token: 'not-a-token' } } },
   'a saved offer list and schedule but no connection': { store: { catalogue: { text: '{}', seq: 3 }, fetch: { lastAttemptAt: 0, failures: 0, nextAt: 0 } } },
@@ -851,24 +1101,353 @@ for (const [name, seed] of Object.entries(BEFORE_CONNECT)) {
   })
 }
 
-stage('accepting the Terms is not a Connect press: it sends nothing and the built-in list stays', async ($, on) => {
-  const { clock, sent, store } = await engine(on, { consent: undefined })
+// ---------------------------------------------------------------- one press to accept and connect (owner, 2026-11-19)
+
+// The band under the chat box, where waiting time is counted.
+const BAND = {
+  plugin: 'pauzza',
+  component: 'AbovePrompt',
+  surface: 'desktop',
+  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 9 }, view: {} },
+} as const
+const working = async ($: any, isWorking: boolean) => {
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, isWorking } })
+  await ui.unmount()
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  stage(`the first screen (${surface}): one Connect button, never pre-set and with no auto-focus, Not now beside it; nothing runs and nothing is sent before it`, async ($, on) => {
+    const { sent, store, lines, toasts, reads, clock, calls, opens } = await engine(on, { consent: undefined })
+
+    await start($)
+    expect(lines.at(-1)).toBe(CONSENT_TEXT.invite)
+    // `/pauzza` opens the panel without asking for the keyboard, so a bare Enter stays with the prompt.
+    await closePane($)
+    expect(opens).toHaveLength(1)
+    expect((opens[0] as any).id).toBe('pauzza-offers')
+    expect((opens[0] as any).focus).toBe(undefined)
+
+    const ui = await mount($, surface)
+    // No element of the screen takes the focus ring: it starts on nothing, so Enter presses nothing.
+    expect((await ui.findAll({})).filter((item: any) => item.props?.autoFocus !== undefined)).toEqual([])
+    const buttons = await ui.findAll({ key: 'connect-press' })
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].props.label).toBe('Connect')
+    expect(buttons[0].props.variant).toBe('primary')
+    // Not chosen in advance: no focus, no hotkey, nothing that reads as already ticked.
+    expect(buttons[0].props.autoFocus).toBe(undefined)
+    expect(buttons[0].props.hotkey).toBe(undefined)
+    expect(buttons[0].props.isOn).toBe(undefined)
+    expect((await ui.find({ key: 'consent-later' })).props.label).toBe(CONSENT_TEXT.later)
+    // The separate tick is gone.
+    expect(await ui.find({ key: 'consent-tick' })).toBe(undefined)
+
+    const shown: string[] = (await ui.findAll({ type: 'Text' })).map((item: any) => item.text)
+    expect(shown).toContain(CONNECT_TEXT.what)
+    expect(shown).toContain(CONNECT_TEXT.figures)
+    expect(shown).toContain(CONNECT_TEXT.acceptStart)
+    expect(shown).toContain(CONNECT_TEXT.acceptEnd)
+    expect((await ui.find({ key: 'connect-terms' })).props.label).toBe('Terms')
+    expect((await ui.find({ key: 'connect-privacy' })).props.label).toBe('Privacy Policy')
+    // No promise that is no longer true, no tick box, and no samples before the press.
+    expect(shown.filter(text => /sends nothing|☐|☑|I accept the Terms/.test(text))).toEqual([])
+    expect(shown).not.toContain(CONSENT_TEXT.samples)
+    expect(shown).not.toContain('Test Pizza')
+    await ui.unmount()
+
+    // The tool at work, every timer, and a day and more: nothing is read, counted, shown or sent.
+    await working($, true)
+    await clock.advance(10 * MINUTE)
+    await working($, false)
+    await clock.advance(26 * HOUR)
+    expect(sent).toEqual([])
+    expect(calls.usage).toBe(0)
+    expect(toasts).toEqual([])
+    expect(store.get('saved')).toEqual(SAVED)
+    expect(store.get('connection')).toBe(undefined)
+    expect(readConsent(store.get('consent')).status).toBe('none')
+    // Not even the release's own settings are read before the press.
+    expect(reads).not.toContain('release.json')
+  })
+}
+
+stage('one press accepts the Terms and Privacy Policy, confirms 18 or older, and connects: exactly one Connect request', async ($, on) => {
+  const { sent, store, paths, calls } = await engine(on, { consent: undefined })
 
   await start($)
-  expect(await press($, 'consent-tick')).toBe(true)
-  await clock.advance(2 * HOUR)
+  expect(await press($, 'connect-press')).toBe(true)
 
-  expect(sent).toEqual([])
-  expect(store.get('connection')).toBe(undefined)
-  expect(await has($, CONSENT_TEXT.samples)).toBe(true)
+  // Accepted, with the Stage B versions, saved on this computer.
+  const consent = readConsent(store.get('consent'))
+  expect(consent.status).toBe('given')
+  expect(consent.termsVersion).toBe(TERMS_VERSION)
+  expect(consent.wordingVersion).toBe(WORDING_VERSION)
+  expect(consent.history.map(item => item.event)).toEqual(['given'])
+  // Connected in the same press: one Connect request with the Stage B versions, then the list.
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+  expect(JSON.parse(sent[0].body!)).toEqual({ wordingVersion: 'stage-b-1', termsVersion: '1.0', privacyVersion: '1.0', addonVersion: '0.21.0' })
+  const record = readConnection(store.get('connection'))
+  expect(isConnected(record)).toBe(true)
+  expect(record.versions).toEqual(VERSIONS)
+  // Only now does Pauzza run: the usage figures are read.
+  expect(calls.usage).toBeGreaterThan(0)
+  expect(await has($, CONNECT_TEXT.connectedNote)).toBe(true)
+  expect(await hasKey($, 'connect-press')).toBe(undefined)
+  expect(await hasKey($, 'consent-later')).toBe(undefined)
   await press($, 'drawer-food')
-  expect(await has($, /^Test Pizza$/)).toBe(true)
-  // The Connect card is now offered, separately.
-  expect(await hasKey($, 'connect-press')).toBeDefined()
+  expect(await has($, /^Mock Pizza$/)).toBe(true)
+  expect(paths().filter(item => item === 'POST connect')).toHaveLength(1)
+})
+
+stage('a quick second press on the first screen sends no second Connect request', async ($, on) => {
+  const { routes, paths, good, store } = await engine(on, { consent: undefined })
+  let release: (value: unknown) => void = () => undefined
+  routes.connect = () => new Promise(resolve => { release = resolve })
+
+  await start($)
+  const ui = await mount($)
+  const first = ui.press({ key: 'connect-press' })
+  const second = ui.press({ key: 'connect-press' }).catch(() => undefined)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  release(good.connect())
+  await first
+  await second
+  await ui.unmount()
+
+  expect(paths().filter(item => item === 'POST connect')).toHaveLength(1)
+  expect(isConnected(readConnection(store.get('connection')))).toBe(true)
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  stage(`the Connect card (${surface}): one sentence, one button, one acceptance line, and nothing else`, async ($, on) => {
+  stage(`Not now (${surface}): one press declines; nothing runs or is sent; the one button stays for later`, async ($, on) => {
+    const { sent, store, lines, clock, calls } = await engine(on, { consent: undefined })
+
+    await start($)
+    expect(await press($, 'consent-later', surface)).toBe(true)
+    expect(readConsent(store.get('consent')).status).toBe('declined')
+    expect(lines.at(-1)).toBe(undefined)
+    expect(await has($, CONSENT_TEXT.declined, surface)).toBe(true)
+    expect(await hasKey($, 'consent-later', surface)).toBe(undefined)
+    expect(await hasKey($, 'connect-press', surface)).toBeDefined()
+    await clock.advance(DAY)
+    expect(sent).toEqual([])
+    expect(calls.usage).toBe(0)
+
+    // Changing their mind is the same one press.
+    expect(await press($, 'connect-press', surface)).toBe(true)
+    expect(readConsent(store.get('consent')).status).toBe('given')
+    expect(sent.map(item => item.url.replace(BASE_URL, ''))).toEqual(['connect', 'catalogue2'])
+  })
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  stage(`a failed connect after the one press (${surface}): the acceptance stands, "Couldn't connect just now" and a Connect button to try again; nothing retries by itself`, async ($, on) => {
+    const { routes, store, paths, clock, good } = await engine(on, { consent: undefined })
+    routes.connect = () => reply(500, { error: 'server' })
+
+    await start($)
+    expect(await press($, 'connect-press', surface)).toBe(true)
+    expect(paths()).toEqual(['POST connect'])
+    expect(readConsent(store.get('consent')).status).toBe('given')
+    expect(isConnected(readConnection(store.get('connection')))).toBe(false)
+
+    // Pauzza runs on this computer with its samples; one button to try again, and no Not now.
+    expect(await has($, CONNECT_TEXT.connectFailed, surface)).toBe(true)
+    expect(await has($, CONSENT_TEXT.samples, surface)).toBe(true)
+    const ui = await mount($, surface)
+    expect(await ui.findAll({ key: 'connect-press' })).toHaveLength(1)
+    expect(await ui.find({ key: 'consent-later' })).toBe(undefined)
+    await ui.unmount()
+    await clock.advance(DAY)
+    expect(paths()).toEqual(['POST connect'])
+
+    // The next press connects. The acceptance already saved is left as it is: retries do not add to its history.
+    routes.connect = good.connect
+    expect(await press($, 'connect-press', surface)).toBe(true)
+    expect(paths()).toEqual(['POST connect', 'POST connect', 'GET catalogue2'])
+    expect(isConnected(readConnection(store.get('connection')))).toBe(true)
+    expect(readConsent(store.get('consent')).history.map(item => item.event)).toEqual(['given'])
+    expect(await has($, CONNECT_TEXT.connectFailed, surface)).toBe(false)
+  })
+}
+
+for (const [when, now] of [['before the Stage B texts apply', NINE_AM], ['from the day they apply', EFFECTIVE_NINE_AM]] as const) {
+  stage(`an acceptance of the old tick, never connected, ${when}: asked again with the one button, which accepts and connects`, async ($, on) => {
+    const { store, paths, lines, calls } = await engine(on, { now, consent: OLD_TICK })
+    const isBefore = now < EFFECTIVE_NINE_AM
+
+    await start($)
+    expect(lines.at(-1)).toBe(CONSENT_TEXT.updateLine)
+    expect(paths()).toEqual([])
+    // Before the date Pauzza keeps running with its samples; from it, it pauses.
+    expect(calls.usage > 0).toBe(isBefore)
+    expect(await has($, CONSENT_TEXT.samples)).toBe(isBefore)
+    expect(await has($, /^Terms updated$/)).toBe(true)
+
+    // One button, with Not now beside it; no second Connect card below.
+    const ui = await mount($)
+    expect(await ui.findAll({ key: 'connect-press' })).toHaveLength(1)
+    expect(await ui.find({ key: 'consent-later' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: CONNECT_TEXT.what })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: CONNECT_TEXT.figures })).toBeDefined()
+    await ui.unmount()
+
+    expect(await press($, 'connect-press')).toBe(true)
+    expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+    const consent = readConsent(store.get('consent'))
+    expect(consent.termsVersion).toBe(TERMS_VERSION)
+    expect(consent.history.map(item => [item.event, item.termsVersion])).toEqual([['given', 'local-1'], ['given', TERMS_VERSION]])
+    expect(isConnected(readConnection(store.get('connection')))).toBe(true)
+    expect(await has($, /^Terms updated$/)).toBe(false)
+  })
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  stage(`the old tick, paused for the Stage B texts (${surface}): "Pauzza is on" off and Undo brings back the old acceptance, not the new one`, async ($, on) => {
+    const { store, sent, calls, clock } = await engine(on, { now: EFFECTIVE_NINE_AM, consent: OLD_TICK })
+
+    await start($)
+    expect(await has($, /^Terms updated$/, surface)).toBe(true)
+    expect(await press($, 'settings-toggle', surface)).toBe(true)
+    expect(await press($, 'consent-untick', surface)).toBe(true)
+    expect(readConsent(store.get('consent')).status).toBe('withdrawn')
+    expect(await press($, 'consent-undo', surface)).toBe(true)
+
+    // Exactly what was switched off: the old Terms version and wording, so still asked again and still paused.
+    const consent = readConsent(store.get('consent'))
+    expect(consent.status).toBe('given')
+    expect(consent.termsVersion).toBe('local-1')
+    expect(consent.wordingVersion).toBe('stage-1.4-en')
+    expect(consent.deletePending).toBe(false)
+    expect(consent.history.map(item => [item.event, item.termsVersion]).at(-1)).toEqual(['given', 'local-1'])
+    await clock.advance(11 * SECOND)
+    await press($, 'settings-back', surface)
+    expect(await has($, /^Terms updated$/, surface)).toBe(true)
+    expect(await hasKey($, 'connect-press', surface)).toBeDefined()
+    expect(await has($, CONSENT_TEXT.samples, surface)).toBe(false)
+    // Nothing ran and nothing was sent; the saved data was not deleted, as the Undo came in time.
+    expect(calls.usage).toBe(0)
+    expect(sent).toEqual([])
+    expect(store.get('saved')).toEqual(SAVED)
+  })
+}
+
+stage('Undo of "Pauzza is on" for someone who accepted the current texts but is not connected: back to running, nothing sent', async ($, on) => {
+  const { store, sent, calls } = await engine(on)
+
+  await start($)
+  const before = calls.usage
+  await openSettings($)
+  expect(await press($, 'consent-untick')).toBe(true)
+  expect(await press($, 'consent-undo')).toBe(true)
+  const consent = readConsent(store.get('consent'))
+  expect(consent.status).toBe('given')
+  expect(consent.termsVersion).toBe(TERMS_VERSION)
+  expect(consent.wordingVersion).toBe(WORDING_VERSION)
+  expect(consent.history.map(item => item.event)).toEqual(['withdrawn', 'given'])
+  await press($, 'settings-back')
+  expect(await has($, CONSENT_TEXT.samples)).toBe(true)
+  expect(await hasKey($, 'connect-press')).toBeDefined()
+  expect(calls.usage).toBeGreaterThan(before)
+  expect(sent).toEqual([])
+})
+
+stage('an acceptance of the old tick with a rehearsal connection: the old install is withdrawn first, then the one button asks again', async ($, on) => {
+  const rehearsal = { ...CONNECTED, versions: { wordingVersion: 'stage-2-test-0.1', termsVersion: '0.1', privacyVersion: '0.1' } }
+  const { store, paths, sent } = await engine(on, { consent: OLD_TICK, store: { connection: rehearsal } })
+
+  await start($)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(sent[0].headers.authorization).toBe(`Bearer ${TOKEN}`)
+  // The update notice holds the only button; no "Disconnected…" line about a press the person never made.
+  const ui = await mount($)
+  expect(await ui.findAll({ key: 'connect-press' })).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: /^Terms updated$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Disconnected/ })).toBe(undefined)
+  await ui.unmount()
+
+  sent.length = 0
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+  expect(readConsent(store.get('consent')).termsVersion).toBe(TERMS_VERSION)
+  expect(isConnected(readConnection(store.get('connection')))).toBe(true)
+})
+
+stage('withdraw and come back: "Pauzza is on" stops, withdraws and disconnects after its 10-second Undo; coming back is the same one press', async ($, on) => {
+  const { store, paths, clock } = await connectedEngine(on, $)
+
+  await openSettings($)
+  expect(await press($, 'consent-untick')).toBe(true)
+  expect(readConsent(store.get('consent')).status).toBe('withdrawn')
+  expect(isConnected(readConnection(store.get('connection')))).toBe(false)
+  await clock.advance(9 * SECOND)
+  expect(paths()).toEqual([])
+  await clock.advance(2 * SECOND)
+  expect(paths()).toEqual(['POST withdraw'])
+
+  // The stopped screen: one button, and no Not now.
+  await press($, 'settings-back')
+  expect(await has($, CONSENT_TEXT.stopped)).toBe(true)
+  expect(await hasKey($, 'consent-later')).toBe(undefined)
+  expect(await hasKey($, 'consent-tick')).toBe(undefined)
+  const ui = await mount($)
+  expect(await ui.findAll({ key: 'connect-press' })).toHaveLength(1)
+  await ui.unmount()
+
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(paths()).toEqual(['POST withdraw', 'POST connect', 'GET catalogue2'])
+  expect(readConsent(store.get('consent')).status).toBe('given')
+  expect(isConnected(readConnection(store.get('connection')))).toBe(true)
+})
+
+for (const [name, endDate] of [['empty', ''], ['left out', null]] as const) {
+  stage(`a build with no end date (${name}) offers Connect normally: the one press connects`, async ($, on) => {
+    const { paths, store } = await engine(on, { consent: undefined, endDate })
+
+    await start($)
+    expect(await press($, 'connect-press')).toBe(true)
+    expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+    expect(isConnected(readConnection(store.get('connection')))).toBe(true)
+  })
+
+  stage(`a build with no end date (${name}): accepted but not connected, the Connect card is offered`, async ($, on) => {
+    const { sent } = await engine(on, { endDate })
+
+    await start($)
+    expect(await hasKey($, 'connect-press')).toBeDefined()
+    expect(await has($, CONNECT_TEXT.what)).toBe(true)
+    expect(sent).toEqual([])
+  })
+}
+
+stage('a build with no end date: nothing ends by a date; the connection and its codes stay past the rehearsal end', async ($, on) => {
+  const lastEvening = new Date(2026, 10, 30, 22, 0).getTime()
+  const key = await testKey(7)
+  const list = await signCatalogue(key, catalogue({ issuedAt: iso(lastEvening - HOUR), expiresAt: iso(lastEvening + 10 * DAY) }))
+  const { paths, store, clock } = await engine(on, {
+    now: lastEvening,
+    endDate: '',
+    store: {
+      connection: { ...CONNECTED, addonVersion: '0.21.0' },
+      codes: [OURS_CODE],
+      catalogue: { text: list, seq: 1, format: 2 },
+      fetch: { lastAttemptAt: lastEvening - HOUR, failures: 0, nextAt: lastEvening + DAY },
+    },
+  })
+
+  await start($)
+  expect(await has($, /^••••••-0043$/)).toBe(true)
+  // Midnight passes: with an end date of 30 November this build would withdraw now.
+  await clock.advance(2 * HOUR + 6 * MINUTE)
+  expect(paths()).toEqual([])
+  expect(isConnected(readConnection(store.get('connection')))).toBe(true)
+  expect(store.get('codes')).toEqual([OURS_CODE])
+  expect(await has($, /^••••••-0043$/)).toBe(true)
+  expect(await has($, /Codes you already claimed stay here/)).toBe(false)
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  stage(`the Connect card (${surface}): the sentence and the usage-figures line, one button, one acceptance line, and nothing else`, async ($, on) => {
     const { sent } = await engine(on)
     await start($)
     const ui = await mount($, surface)
@@ -880,10 +1459,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(connect.props.hotkey).toBe(undefined)
     // Alone: no "Not now", no reopen row.
     expect(await ui.find({ key: 'connect-later' })).toBe(undefined)
+    expect(await ui.find({ key: 'consent-later' })).toBe(undefined)
     expect(await ui.find({ key: 'connect-reopen' })).toBe(undefined)
 
     const shown: any[] = await ui.findAll({ type: 'Text' })
-    const card = ['what', 'acceptStart', 'acceptMiddle', 'acceptEnd'].map(name => shown.find(item => item.text === (CONNECT_TEXT as any)[name]))
+    const card = ['what', 'figures', 'acceptStart', 'acceptMiddle', 'acceptEnd'].map(name => shown.find(item => item.text === (CONNECT_TEXT as any)[name]))
 
     // The same light weight as the acceptance step: small, dim, no bold, no colour.
     for (const line of card) {
@@ -896,17 +1476,17 @@ for (const surface of ['terminal', 'desktop'] as const) {
     }
 
     // Nothing of the earlier card is left on screen.
-    expect(shown.filter(item => /I agree|USA|weaker protection|Not now|not connected|test ends on|free of charge/i.test(item.text))).toEqual([])
+    expect(shown.filter(item => /I agree|\bUSA\b|weaker protection|Not now|not connected|test ends on|free of charge/i.test(item.text))).toEqual([])
     expect((await ui.find({ key: 'connect-terms' })).props.label).toBe('Terms')
     expect((await ui.find({ key: 'connect-privacy' })).props.label).toBe('Privacy Policy')
 
-    // Both documents open in one press, and they are the test editions.
+    // Both documents open in one press, and they are the Stage B texts the press accepts.
     await ui.press({ key: 'connect-privacy' })
     await ui.unmount()
-    expect(await documentText($, surface)).toBe('DOC PRIVACY-REHEARSAL.md')
+    expect(await documentText($, surface)).toBe('DOC PRIVACY.md')
     await press($, 'document-back', surface)
     await press($, 'connect-terms', surface)
-    expect(await documentText($, surface)).toBe('DOC TERMS-REHEARSAL.md')
+    expect(await documentText($, surface)).toBe('DOC TERMS.md')
     await press($, 'document-back', surface)
     // The built-in samples stay usable beside the card.
     expect(await has($, CONSENT_TEXT.samples, surface)).toBe(true)
@@ -914,7 +1494,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
-stage('with the end date missing, the Connect card is not offered and nothing can connect', async ($, on) => {
+stage('with a placeholder end date, the Connect card is not offered and nothing can connect', async ($, on) => {
   for (const endDate of ['[TEST END DATE]']) {
     const { sent, clock } = await engine(on, { endDate })
 
@@ -928,13 +1508,31 @@ stage('with the end date missing, the Connect card is not offered and nothing ca
   }
 })
 
-stage('with no end date at all in the release, the Connect card is not offered', async ($, on) => {
-  const { sent } = await engine(on, { endDate: '' })
+stage('a build past its own end date: the first screen still offers the one press, which then only accepts; nothing is sent and no card comes back', async ($, on) => {
+  const { sent, store, clock } = await engine(on, { now: new Date(2026, 11, 1, 9, 0).getTime(), consent: undefined })
 
   await start($)
-  expect(await hasKey($, 'connect-press')).toBe(undefined)
-  expect(await has($, CONNECT_TEXT.what)).toBe(false)
+  expect(await hasKey($, 'connect-press')).toBeDefined()
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(readConsent(store.get('consent')).status).toBe('given')
+  await clock.advance(DAY)
   expect(sent).toEqual([])
+  expect(await hasKey($, 'connect-press')).toBe(undefined)
+  expect(await has($, CONNECT_TEXT.connectFailed)).toBe(false)
+  expect(await has($, CONSENT_TEXT.samples)).toBe(true)
+})
+
+stage('with a placeholder end date, the one press on the first screen accepts and sends nothing', async ($, on) => {
+  const { sent, store, clock } = await engine(on, { consent: undefined, endDate: '[TEST END DATE]' })
+
+  await start($)
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(readConsent(store.get('consent')).status).toBe('given')
+  await clock.advance(DAY)
+  expect(sent).toEqual([])
+  expect(await hasKey($, 'connect-press')).toBe(undefined)
+  expect(await has($, CONNECT_TEXT.connectFailed)).toBe(false)
+  expect(await has($, CONSENT_TEXT.samples)).toBe(true)
 })
 
 stage('closing the panel declines: nothing is sent or saved, nothing nags, and the card is still there next time', async ($, on) => {
@@ -962,11 +1560,11 @@ stage('the Connect press: one request with the versions only, then the anonymous
   await start($)
   expect(await press($, 'connect-press')).toBe(true)
 
-  expect(paths()).toEqual(['POST connect', 'GET catalogue'])
-  expect(JSON.parse(sent[0].body!)).toEqual({ ...VERSIONS, addonVersion: '0.20.2' })
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+  expect(JSON.parse(sent[0].body!)).toEqual({ ...VERSIONS, addonVersion: '0.21.0' })
   expect(Object.keys(sent[0].headers)).toEqual(['content-type'])
   // The list is fetched with no token, no body and no query.
-  expect(sent[1]).toEqual({ url: `${BASE_URL}catalogue`, method: 'GET', headers: {}, body: undefined })
+  expect(sent[1]).toEqual({ url: `${BASE_URL}catalogue2`, method: 'GET', headers: {}, body: undefined })
 
   const record = readConnection(store.get('connection'))
   expect(isConnected(record)).toBe(true)
@@ -975,7 +1573,7 @@ stage('the Connect press: one request with the versions only, then the anonymous
 
   // 2b, once; then the server's offers, marked as test codes.
   expect(await has($, CONNECT_TEXT.connectedNote)).toBe(true)
-  expect(await has($, CONNECT_TEXT.testCodes)).toBe(true)
+  expect(await has($, CONNECT_TEXT.offersLabel)).toBe(true)
   expect(await has($, CONSENT_TEXT.samples)).toBe(false)
   expect(await hasKey($, 'connect-press')).toBe(undefined)
   await press($, 'drawer-food')
@@ -990,7 +1588,7 @@ stage('the Connect press: one request with the versions only, then the anonymous
   await closePane($)
   expect(await has($, CONNECT_TEXT.connectedNote)).toBe(false)
   await clock.advance(HOUR)
-  expect(paths()).toEqual(['POST connect', 'GET catalogue'])
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
   expect(toasts).toEqual([OFFER_POPUP])
 })
 
@@ -1090,20 +1688,21 @@ const HOSTILE_LISTS: Record<string, () => Promise<unknown> | unknown> = {
 }
 
 for (const [name, route] of Object.entries(HOSTILE_LISTS)) {
-  stage(`an offer list that ${name} is refused: built-in samples stay, and the next try waits`, async ($, on) => {
+  stage(`an offer list that ${name} is refused: no offers show, and the next try waits`, async ($, on) => {
     const { routes, store, paths, clock } = await engine(on, { store: { connection: CONNECTED } })
-    routes.catalogue = route as Route
+    routes.catalogue2 = route as Route
 
     await start($)
     await clock.advance(TIMEOUT_MS + SECOND)
 
-    expect(paths()).toEqual(['GET catalogue'])
+    expect(paths()).toEqual(['GET catalogue2'])
     expect(store.get('catalogue')).toBe(undefined)
-    expect(await has($, CONSENT_TEXT.samples)).toBe(true)
-    expect(await has($, CONNECT_TEXT.testCodes)).toBe(false)
-    expect(await has($, CONNECT_TEXT.offlineSamples)).toBe(true)
-    await press($, 'drawer-food')
-    expect(await has($, /^Test Pizza$/)).toBe(true)
+    // Connected: no practice samples, only the calm note.
+    expect(await has($, CONSENT_TEXT.samples)).toBe(false)
+    expect(await has($, CONNECT_TEXT.noOffers)).toBe(true)
+    expect(await has($, SLOT_TEXT.offlineNoList)).toBe(true)
+    expect(await press($, 'drawer-food')).toBe(false)
+    expect(await has($, /^Test Pizza$/)).toBe(false)
     expect(await has($, /script|evil|99%/)).toBe(false)
 
     // Redraws and status refreshes never fetch; the schedule backs off instead.
@@ -1112,24 +1711,24 @@ for (const [name, route] of Object.entries(HOSTILE_LISTS)) {
     }
 
     await clock.advance(FIRST_RETRY_MS - MINUTE)
-    expect(paths()).toEqual(['GET catalogue'])
+    expect(paths()).toEqual(['GET catalogue2'])
     await clock.advance(DAY)
     const tries = paths().length
     expect(tries).toBeGreaterThan(1)
     // 15 min, 30 min, 1 h, 2 h, 4 h, 8 h, then daily: a handful in a day, not a flood.
     expect(tries).toBeLessThanOrEqual(8)
-    expect(paths().every(item => item === 'GET catalogue')).toBe(true)
+    expect(paths().every(item => item === 'GET catalogue2')).toBe(true)
   })
 }
 
 stage('a replayed older list does not replace a newer one', async ($, on) => {
   const { routes, store, clock, key, paths } = await engine(on, { store: { connection: CONNECTED } })
-  routes.catalogue = async () => reply(200, await signCatalogue(key, catalogue({ seq: 5 })))
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ seq: 5 })))
 
   await start($)
   expect((store.get('catalogue') as any).seq).toBe(5)
 
-  routes.catalogue = async () => reply(200, await signCatalogue(key, catalogue({ seq: 4, offers: [offer('old-offer', { brand: 'Old Offer' })] })))
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ seq: 4, offers: [offer('old-offer', { brand: 'Old Offer' })] })))
   await clock.advance(6 * HOUR)
   expect(paths().length).toBeGreaterThan(1)
   expect((store.get('catalogue') as any).seq).toBe(5)
@@ -1142,21 +1741,21 @@ stage('a saved offer list that was tampered with is not believed at the next sta
   const key = await testKey(7)
   const text = (await signCatalogue(key, catalogue())).replace('15% off', '99% off')
   const { routes, clock } = await engine(on, { store: { connection: CONNECTED, catalogue: { text, seq: 1 }, fetch: { lastAttemptAt: NINE_AM, failures: 0, nextAt: NINE_AM + 4 * HOUR } } })
-  routes.catalogue = () => reply(500, '')
+  routes.catalogue2 = () => reply(500, '')
 
   await start($)
   await clock.advance(MINUTE)
-  expect(await has($, CONSENT_TEXT.samples)).toBe(true)
-  await press($, 'drawer-food')
+  expect(await has($, CONNECT_TEXT.noOffers)).toBe(true)
+  expect(await press($, 'drawer-food')).toBe(false)
   expect(await has($, /99%/)).toBe(false)
-  expect(await has($, /^Test Pizza$/)).toBe(true)
+  expect(await has($, /^Test Pizza$/)).toBe(false)
 })
 
 stage('the offer list is fetched on its schedule only: never from a redraw, a refresh or at 12:00', async ($, on) => {
   const { sent, clock, paths, times } = await engine(on, { store: { connection: CONNECTED } })
 
   await start($)
-  expect(paths()).toEqual(['GET catalogue'])
+  expect(paths()).toEqual(['GET catalogue2'])
 
   // A hundred redraws, on both surfaces, and three hours of timers.
   for (let i = 0; i < 50; i += 1) {
@@ -1164,7 +1763,7 @@ stage('the offer list is fetched on its schedule only: never from a redraw, a re
   }
 
   await clock.advance(3 * HOUR)
-  expect(paths()).toEqual(['GET catalogue'])
+  expect(paths()).toEqual(['GET catalogue2'])
   // 12:00 passes inside those three hours: nobody fetches at the daily opening.
   expect(times.filter(time => new Date(time).getHours() === 12 && new Date(time).getMinutes() === 0)).toEqual([])
 
@@ -1177,7 +1776,7 @@ stage('the offer list is fetched on its schedule only: never from a redraw, a re
     expect(times[i] - times[i - 1]).toBeGreaterThanOrEqual(MIN_GAP_MS)
   }
 
-  expect(paths().every(item => item === 'GET catalogue')).toBe(true)
+  expect(paths().every(item => item === 'GET catalogue2')).toBe(true)
   // Never a token, a body or a query on the anonymous fetch.
   expect(sent.every(item => item.headers.authorization === undefined && item.body === undefined && !item.url.includes('?'))).toBe(true)
 })
@@ -1191,15 +1790,15 @@ stage('a second session does not fetch again while the shared schedule says wait
   await clock.advance(3 * HOUR)
   expect(paths()).toEqual([])
   // The saved list is used meanwhile.
-  expect(await has($, CONNECT_TEXT.testCodes)).toBe(true)
+  expect(await has($, CONNECT_TEXT.offersLabel)).toBe(true)
   await clock.advance(2 * HOUR)
-  expect(paths()).toEqual(['GET catalogue'])
+  expect(paths()).toEqual(['GET catalogue2'])
 })
 
 async function connectedEngine(on: any, $: any, options: Parameters<typeof engine>[1] = {}) {
   const made = await engine(on, { ...options, store: { connection: CONNECTED, ...(options.store ?? {}) } })
   await start($)
-  expect(made.paths()).toEqual(['GET catalogue'])
+  expect(made.paths()).toEqual(['GET catalogue2'])
   made.sent.length = 0
 
   return made
@@ -1350,9 +1949,127 @@ stage('"unavailable" from the server: "No codes left" only when the device can r
   expect(paths()).toEqual(['POST claim'])
 })
 
+for (const surface of ['terminal', 'desktop'] as const) {
+stage(`"No codes left" (${surface}) is remembered on this computer for 3 hours, under the list in hand, and the row can still be pressed`, async ($, on) => {
+  const { routes, paths, clock, store } = await connectedEngine(on, $)
+  routes.claim = () => reply(404, { error: 'unavailable' })
+
+  await press($, 'drawer-food', surface)
+  await press($, 'claim-mock-pizza', surface)
+  // Saved: the list number and the time, under the offer's campaign. Nothing else, and nothing sent.
+  expect(store.get(NONE_LEFT_KEY)).toEqual({ seq: 1, at: { 'mock-pizza-c1': NINE_AM } })
+  expect(paths()).toEqual(['POST claim'])
+
+  // After the one-time note has gone (15 minutes), the row still says so, dimmed, with the button back.
+  await clock.advance(20 * MINUTE)
+  expect(await has($, /^No codes left$/, surface)).toBe(true)
+  expect(await hasKey($, 'claim-mock-pizza', surface)).toBeDefined()
+  expect(paths()).toEqual(['POST claim'])
+
+  // Three hours after the answer it is forgotten.
+  await clock.advance(3 * HOUR - 20 * MINUTE)
+  expect(await has($, /No codes left/, surface)).toBe(false)
+  expect(await hasKey($, 'claim-mock-pizza', surface)).toBeDefined()
+})
+}
+
+stage('a remembered "No codes left" goes when a later press gets a code, and on "Check now"', async ($, on) => {
+  const { routes, clock, store } = await connectedEngine(on, $)
+  routes.claim = () => reply(404, { error: 'unavailable' })
+  await press($, 'drawer-food')
+  await press($, 'claim-mock-pizza')
+  expect(Object.keys(store.get(NONE_LEFT_KEY).at)).toEqual(['mock-pizza-c1'])
+
+  // A press past the one-time note: the server gives a code this time, so it is forgotten.
+  await clock.advance(20 * MINUTE)
+  routes.claim = () => reply(200, CLAIM_BODY)
+  await press($, 'claim-mock-pizza')
+  expect(store.get(NONE_LEFT_KEY)).toBe(undefined)
+
+  // "None left" for another offer, then "Check now" in Settings forgets it.
+  routes.claim = () => reply(404, { error: 'unavailable' })
+  await press($, 'drawer-drinks')
+  await press($, 'claim-mock-juice')
+  expect(Object.keys(store.get(NONE_LEFT_KEY).at)).toEqual(['mock-juice-c1'])
+  await clock.advance(MANUAL_GAP_MS + MINUTE)
+  await press($, 'settings-toggle')
+  await press($, 'check-now')
+  await settlePress()
+  expect(store.get(NONE_LEFT_KEY)).toBe(undefined)
+})
+
+stage('"Not available right now" is not remembered, and a saved "none left" from another list number is not shown', async ($, on) => {
+  const { routes, key, store } = await engine(on, { store: { connection: CONNECTED, noneLeft: { seq: 7, at: { 'mock-pizza-c1': NINE_AM } } } })
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ offers: [offer('mock-pizza', {}, { opensAt: iso(NINE_AM - 30 * SECOND) })] })))
+  routes.claim = () => reply(404, { error: 'unavailable' })
+
+  await start($)
+  await press($, 'drawer-food')
+  // Learned under list 7; the list in hand is 1.
+  expect(await has($, /No codes left/)).toBe(false)
+  await press($, 'claim-mock-pizza')
+  expect(await has($, /^Not available right now$/)).toBe(true)
+  // The answer for this list was "not available": nothing is kept for it.
+  expect(store.get(NONE_LEFT_KEY)).toBe(undefined)
+})
+
+stage('a remembered "No codes left" for the list in hand goes when a later press is answered "Not available right now"', async ($, on) => {
+  // Remembered under list 1, the list in hand. The offer has only just opened, so the device cannot rule
+  // out "too early": a refusal now reads "Not available right now", and the memory goes.
+  const { routes, key, store } = await engine(on, { store: { connection: CONNECTED, noneLeft: { seq: 1, at: { 'mock-pizza-c1': NINE_AM - MINUTE } } } })
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ offers: [offer('mock-pizza', {}, { opensAt: iso(NINE_AM - 30 * SECOND) })] })))
+  routes.claim = () => reply(404, { error: 'unavailable' })
+
+  await start($)
+  await press($, 'drawer-food')
+  expect(await has($, /^No codes left$/)).toBe(true)
+  await press($, 'claim-mock-pizza')
+  expect(await has($, /^Not available right now$/)).toBe(true)
+  expect(store.get(NONE_LEFT_KEY)).toBe(undefined)
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  stage(`Settings (${surface}): the support line is the last thing there, not beside the codes`, async ($, on) => {
+    await connectedEngine(on, $)
+    await press($, 'drawer-food', surface)
+    await press($, 'claim-mock-pizza', surface)
+    await press($, 'drawer-mine', surface)
+    // Under Mine: the code, and no support line (owner, 2026-11-19).
+    expect(await has($, CONNECT_TEXT.support, surface)).toBe(false)
+    await press($, 'settings-toggle', surface)
+    const lines = await texts($, surface)
+    expect(lines.at(-1)).toBe(CONNECT_TEXT.support)
+    // The reference stays, with its note.
+    expect(lines).toContain(CONNECT_TEXT.referenceNote)
+  })
+}
+
+stage('"Delete saved data" removes a remembered "No codes left"', async ($, on) => {
+  const { routes, store } = await connectedEngine(on, $)
+  routes.claim = () => reply(404, { error: 'unavailable' })
+  await press($, 'drawer-food')
+  await press($, 'claim-mock-pizza')
+  expect(store.get(NONE_LEFT_KEY)).toBeDefined()
+  await press($, 'settings-toggle')
+  await press($, 'reset')
+  await press($, 'reset-confirm')
+  await settlePress()
+  expect(store.get(NONE_LEFT_KEY)).toBe(undefined)
+})
+
+test('a saved "none left" record is read strictly: anything odd is an empty record', () => {
+  expect(readNoneLeft(undefined)).toEqual({ seq: 0, at: {} })
+  expect(readNoneLeft({ seq: 0, at: {} })).toEqual({ seq: 0, at: {} })
+  expect(readNoneLeft({ seq: 1.5, at: {} })).toEqual({ seq: 0, at: {} })
+  expect(readNoneLeft({ seq: 2, at: [] })).toEqual({ seq: 0, at: {} })
+  expect(readNoneLeft({ seq: 2, at: { 'mock-pizza-c1': 5, 'BAD ID': 6, constructor: 'x', other: Number.NaN } })).toEqual({ seq: 2, at: { 'mock-pizza-c1': 5 } })
+  const many = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`c-${i}`, i]))
+  expect(Object.keys(readNoneLeft({ seq: 3, at: many }).at).length).toBe(200)
+})
+
 stage('"unavailable" for an offer that only just opened reads "Not available right now"', async ($, on) => {
   const { routes, key } = await engine(on, { store: { connection: CONNECTED } })
-  routes.catalogue = async () => reply(200, await signCatalogue(key, catalogue({ offers: [offer('mock-pizza', {}, { opensAt: iso(NINE_AM - 30 * SECOND) })] })))
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ offers: [offer('mock-pizza', {}, { opensAt: iso(NINE_AM - 30 * SECOND) })] })))
   routes.claim = () => reply(404, { error: 'unavailable' })
 
   await start($)
@@ -1364,7 +2081,7 @@ stage('"unavailable" for an offer that only just opened reads "Not available rig
 
 stage('an offer that is not open yet has no button, and an ended one is not listed', async ($, on) => {
   const { routes, key, paths, sent } = await engine(on, { store: { connection: CONNECTED } })
-  routes.catalogue = async () =>
+  routes.catalogue2 = async () =>
     reply(200, await signCatalogue(key, catalogue({
       offers: [
         offer('later', { brand: 'Mock Later' }, { opensAt: iso(NINE_AM + 3 * HOUR) }),
@@ -1386,7 +2103,7 @@ stage('the off switch: a signed empty list removes every offer, calmly', async (
 
   await press($, 'drawer-food')
   await press($, 'claim-mock-pizza')
-  routes.catalogue = async () => reply(200, await signCatalogue(key, catalogue({ seq: 2, offers: [], categories: [], popupRules: [] })))
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ seq: 2, offers: [], categories: [], popupRules: [] })))
   await clock.advance(6 * HOUR)
 
   expect((store.get('catalogue') as any).seq).toBe(2)
@@ -1402,7 +2119,7 @@ stage('the off switch: a signed empty list removes every offer, calmly', async (
 
 stage('a signed minimum version above this one hides the offers', async ($, on) => {
   const { routes, key } = await engine(on, { store: { connection: CONNECTED } })
-  routes.catalogue = async () => reply(200, await signCatalogue(key, catalogue({ minAddonVersion: '9.0.0' })))
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ minAddonVersion: '9.0.0' })))
 
   await start($)
   expect(await texts($)).toContain('No offers right now')
@@ -1410,16 +2127,16 @@ stage('a signed minimum version above this one hides the offers', async ($, on) 
   expect(await has($, /Mock Pizza/)).toBe(false)
 })
 
-stage('offline: the last good list stays until its own end date, "Get code" is dimmed, then built-in samples', async ($, on) => {
+stage('offline: the last good list stays until its own end date, "Get code" stays, then no offers', async ($, on) => {
   const { routes, clock, paths, sent, walk, good } = await connectedEngine(on, $)
 
-  routes.catalogue = () => new Error('offline')
+  routes.catalogue2 = () => new Error('offline')
   await clock.advance(6 * HOUR)
   expect(paths().length).toBeGreaterThan(0)
   sent.length = 0
 
   expect(await has($, CONNECT_TEXT.offlineList)).toBe(true)
-  expect(await has($, CONNECT_TEXT.testCodes)).toBe(true)
+  expect(await has($, CONNECT_TEXT.offersLabel)).toBe(true)
   await press($, 'drawer-food')
   expect(await has($, /^Mock Pizza$/)).toBe(true)
   // "Get code" stays pressable: a press tries the server, and says so if it cannot be reached.
@@ -1441,25 +2158,517 @@ stage('offline: the last good list stays until its own end date, "Get code" is d
   expect(notice.props.dimColor).toBe(true)
   await ui.unmount()
 
-  // The list's own end date passes (10 days): back to the built-in samples.
+  // The list's own end date passes (10 days): no offers, and never the practice samples.
   await walk(11 * DAY)
-  expect(await has($, CONNECT_TEXT.offlineSamples)).toBe(true)
-  expect(await has($, CONSENT_TEXT.samples)).toBe(true)
-  await press($, 'drawer-food')
-  expect(await has($, /^Test Pizza$/)).toBe(true)
+  expect(await has($, SLOT_TEXT.offlineNoList)).toBe(true)
+  expect(await has($, CONNECT_TEXT.noOffers)).toBe(true)
+  expect(await has($, CONSENT_TEXT.samples)).toBe(false)
+  expect(await press($, 'drawer-food')).toBe(false)
+  expect(await has($, /^Test Pizza$/)).toBe(false)
 })
 
 stage('the notice goes by itself when the server answers again', async ($, on) => {
   const { routes, clock, good } = await connectedEngine(on, $)
 
-  routes.catalogue = () => reply(500, '')
+  routes.catalogue2 = () => reply(500, '')
   await clock.advance(6 * HOUR)
   expect(await has($, CONNECT_TEXT.offlineList)).toBe(true)
-  routes.catalogue = good.catalogue
+  routes.catalogue2 = good.catalogue2
   await clock.advance(DAY)
   expect(await has($, /Can't reach Pauzza/)).toBe(false)
   await press($, 'drawer-food')
   expect(await hasKey($, 'claim-mock-pizza')).toBeDefined()
+})
+
+// "Try now": the person's own press fetches the signed list at once, through the
+// same request and checks, at most once per 30 seconds on this computer.
+const settlePress = settle
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  stage(`Try now (${surface}): shown only while the server is out of reach; a press fetches the list at once and clears the wait`, async ($, on) => {
+    const { routes, clock, paths, sent, store, good } = await connectedEngine(on, $)
+
+    // Reachable: no button.
+    expect(await hasKey($, 'try-now', surface)).toBe(undefined)
+
+    routes.catalogue2 = () => new Error('offline')
+    await clock.advance(6 * HOUR)
+    expect(await has($, CONNECT_TEXT.offlineList, surface)).toBe(true)
+    expect(await hasKey($, 'try-now', surface)).toBeDefined()
+    expect((await hasKey($, 'try-now', surface)).props.label).toBe(SLOT_TEXT.tryNow)
+    expect((store.get('fetch') as any).failures).toBeGreaterThan(0)
+
+    routes.catalogue2 = good.catalogue2
+    sent.length = 0
+    expect(await press($, 'try-now', surface)).toBe(true)
+    await settlePress()
+
+    // One request, the same one the schedule makes: same address, same headers, no body.
+    expect(paths()).toEqual(['GET catalogue2'])
+    expect(sent[0].body).toBe(undefined)
+    expect(sent[0].headers).toEqual({})
+    expect(await has($, /Can't reach Pauzza/, surface)).toBe(false)
+    expect(await hasKey($, 'try-now', surface)).toBe(undefined)
+    expect((store.get('fetch') as any).failures).toBe(0)
+    // The next automatic fetch is the normal few hours away again.
+    expect((store.get('fetch') as any).nextAt).toBeGreaterThanOrEqual(clock.now() + MIN_GAP_MS)
+  })
+}
+
+stage('Try now with no list in hand: the button shows beside the "no list" line, and a press brings the offers', async ($, on) => {
+  const { routes, clock, paths, sent, good } = await engine(on, { store: { connection: CONNECTED } })
+
+  routes.catalogue2 = () => new Error('offline')
+  await start($)
+  expect(await has($, SLOT_TEXT.offlineNoList)).toBe(true)
+  expect(await hasKey($, 'try-now')).toBeDefined()
+
+  routes.catalogue2 = good.catalogue2
+  sent.length = 0
+  expect(await press($, 'try-now')).toBe(true)
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(await has($, SLOT_TEXT.offlineNoList)).toBe(false)
+  await press($, 'drawer-food')
+  expect(await hasKey($, 'claim-mock-pizza')).toBeDefined()
+})
+
+stage('Try now that fails: the automatic waits stay exactly as they were, and the panel says so calmly', async ($, on) => {
+  const { routes, clock, paths, sent, store } = await connectedEngine(on, $)
+
+  routes.catalogue2 = () => new Error('offline')
+  await clock.advance(6 * HOUR)
+  const before = JSON.parse(JSON.stringify(store.get('fetch')))
+  expect(before.failures).toBeGreaterThan(0)
+
+  sent.length = 0
+  expect(await press($, 'try-now')).toBe(true)
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  // Not reset, not shortened, not lengthened: the schedule record is untouched.
+  expect(store.get('fetch')).toEqual(before)
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(true)
+  expect(await has($, CONNECT_TEXT.offlineList)).toBe(true)
+  expect(await hasKey($, 'try-now')).toBeDefined()
+
+  // The automatic retry still comes at the time it was already due, not earlier.
+  sent.length = 0
+  await clock.advance(Math.max(0, before.nextAt - clock.now() - MINUTE * 6))
+  expect(paths()).toEqual([])
+  await clock.advance(MINUTE * 12)
+  expect(paths()).toEqual(['GET catalogue2'])
+})
+
+stage('Try now: at most one fetch per 30 seconds on this computer; a press inside that time only says to wait', async ($, on) => {
+  const { routes, clock, paths, sent, store } = await connectedEngine(on, $)
+
+  routes.catalogue2 = () => new Error('offline')
+  await clock.advance(6 * HOUR)
+  sent.length = 0
+
+  await press($, 'try-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(store.get(MANUAL_TRY_KEY)).toBe(clock.now())
+
+  // Pressed again at once, and again 29 seconds later: nothing is sent.
+  await press($, 'try-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(await has($, SLOT_TEXT.tryWait)).toBe(true)
+  await clock.advance(MANUAL_GAP_MS - SECOND)
+  await press($, 'try-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+
+  // From 30 seconds on, a press fetches again.
+  await clock.advance(SECOND)
+  await press($, 'try-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2', 'GET catalogue2'])
+
+  // A press in another window counts too: the time is shared by the saved record.
+  // Past this window's own 30 seconds, a time saved 10 seconds ago still blocks.
+  await clock.advance(MANUAL_GAP_MS + SECOND)
+  store.set(MANUAL_TRY_KEY, clock.now() - 10 * SECOND)
+  sent.length = 0
+  await press($, 'try-now')
+  await settlePress()
+  expect(paths()).toEqual([])
+  expect(await has($, SLOT_TEXT.tryWait)).toBe(true)
+
+  // The wait note goes when the panel closes.
+  await closePane($)
+  expect(await has($, SLOT_TEXT.tryWait)).toBe(false)
+})
+
+stage('Try now answered with a list that fails the checks: nothing kept, the waits untouched, a calm note', async ($, on) => {
+  const { routes, clock, paths, sent, store, key } = await connectedEngine(on, $)
+
+  routes.catalogue2 = () => new Error('offline')
+  await clock.advance(6 * HOUR)
+  const before = JSON.parse(JSON.stringify(store.get('fetch')))
+  const held = JSON.parse(JSON.stringify(store.get('catalogue')))
+  // A newer list whose signature does not match.
+  const signed = JSON.parse(await signCatalogue(key, catalogue({ seq: 9 })))
+  signed.sig = signed.sig.startsWith('A') ? `B${signed.sig.slice(1)}` : `A${signed.sig.slice(1)}`
+  routes.catalogue2 = () => reply(200, JSON.stringify(signed))
+
+  sent.length = 0
+  await press($, 'try-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(store.get('fetch')).toEqual(before)
+  expect(store.get('catalogue')).toEqual(held)
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(true)
+})
+
+stage('Try now: a note from an earlier press does not come back with a later failure', async ($, on) => {
+  const { routes, clock, good } = await connectedEngine(on, $)
+
+  routes.catalogue2 = () => new Error('offline')
+  await clock.advance(6 * HOUR)
+  await press($, 'try-now')
+  await settlePress()
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(true)
+
+  // The panel stays open: the schedule succeeds, then fails again, with no press.
+  routes.catalogue2 = good.catalogue2
+  await clock.advance(DAY)
+  expect(await has($, /Can't reach Pauzza/)).toBe(false)
+  routes.catalogue2 = () => new Error('offline')
+  await clock.advance(6 * HOUR)
+  expect(await has($, CONNECT_TEXT.offlineList)).toBe(true)
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(false)
+})
+
+stage('Try now: disconnecting deletes its saved time with everything else the server sent', async ($, on) => {
+  const { routes, clock, store } = await connectedEngine(on, $)
+
+  routes.catalogue2 = () => new Error('offline')
+  await clock.advance(6 * HOUR)
+  await press($, 'try-now')
+  await settlePress()
+  expect(store.get(MANUAL_TRY_KEY)).toBeDefined()
+  await openSettings($)
+  await press($, 'consent-untick')
+  await clock.advance(11 * SECOND)
+  expect(store.get('fetch')).toBe(undefined)
+  expect(store.get(MANUAL_TRY_KEY)).toBe(undefined)
+})
+
+// "Check now" in Settings: the "Try now" press, offered while connected
+// whether or not the server is reachable. Same request, same checks, the same
+// 30 seconds shared with "Try now", and its own notes.
+const CHECK_LINE = /^(Offers checked|Not checked yet|Last check didn't go through)/
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  stage(`Check now (${surface}): a row in Settings while connected, not on the main screen; a press checks at once`, async ($, on) => {
+    const { clock, paths, sent, store } = await connectedEngine(on, $)
+
+    // The main screen stays as it was: no row, and no "Try now" while reachable.
+    expect(await hasKey($, 'check-now', surface)).toBe(undefined)
+    expect(await has($, CHECK_LINE, surface)).toBe(false)
+    expect(await hasKey($, 'try-now', surface)).toBe(undefined)
+
+    await openSettings($, surface)
+    expect(await has($, SLOT_TEXT.checkedAt('09:00'), surface)).toBe(true)
+    expect((await hasKey($, 'check-now', surface)).props.label).toBe(SLOT_TEXT.checkNow)
+
+    // The app draws the row's own tile, like every other Settings row; the terminal draws none.
+    const ui = await mount($, surface)
+    const sources = (await ui.findAll({ type: 'Svg' })).map((svg: any) => svg.props.source)
+    await ui.unmount()
+    expect(sources.includes(iconTileSvg('check'))).toBe(surface === 'desktop')
+
+    await clock.advance(HOUR + 5 * MINUTE)
+    sent.length = 0
+    expect(await press($, 'check-now', surface)).toBe(true)
+    await settlePress()
+
+    // One request, the same one the schedule makes: same address, no header, no body.
+    expect(paths()).toEqual(['GET catalogue2'])
+    expect(sent[0].url).toBe(catalogueRequest().url)
+    expect(sent[0].headers).toEqual({})
+    expect(sent[0].body).toBe(undefined)
+    expect(await has($, SLOT_TEXT.checkSame, surface)).toBe(true)
+    expect(await has($, SLOT_TEXT.checkedAt('10:05'), surface)).toBe(true)
+    // A success starts the automatic wait afresh, as any success does.
+    expect((store.get('fetch') as any).failures).toBe(0)
+    expect((store.get('fetch') as any).lastAttemptAt).toBe(clock.now())
+    expect((store.get('fetch') as any).nextAt).toBeGreaterThanOrEqual(clock.now() + MIN_GAP_MS)
+    expect(store.get(MANUAL_TRY_KEY)).toBe(clock.now())
+
+    // Back on the main screen: nothing of the row, and nothing else changed.
+    await press($, 'settings-back', surface)
+    expect(await hasKey($, 'check-now', surface)).toBe(undefined)
+    expect(await has($, SLOT_TEXT.checkSame, surface)).toBe(false)
+    expect(await hasKey($, 'try-now', surface)).toBe(undefined)
+  })
+}
+
+stage('Check now: a newer signed list says "Offer list updated" and its offers show; the same list again says "Up to date"', async ($, on) => {
+  const { clock, paths, sent, store, routes, key } = await connectedEngine(on, $)
+  const newer = await signCatalogue(key, catalogue({ seq: 2, offers: [offer('mock-pizza'), offer('mock-cake', { brand: 'Mock Cake', text: 'A free mock cake' })] }))
+  routes.catalogue2 = () => reply(200, newer)
+
+  await openSettings($)
+  await press($, 'check-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(await has($, SLOT_TEXT.checkNew)).toBe(true)
+  expect(await has($, SLOT_TEXT.checkSame)).toBe(false)
+  expect((store.get('catalogue') as any).seq).toBe(2)
+  expect(store.get(LIST_FLOOR_KEY)).toBe(2)
+
+  await press($, 'settings-back')
+  await press($, 'drawer-food')
+  expect(await hasKey($, 'claim-mock-cake')).toBeDefined()
+
+  // The same list again, after the 30 seconds.
+  await clock.advance(MANUAL_GAP_MS + SECOND)
+  await openSettings($)
+  sent.length = 0
+  await press($, 'check-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(await has($, SLOT_TEXT.checkSame)).toBe(true)
+  expect(await has($, SLOT_TEXT.checkNew)).toBe(false)
+})
+
+stage('Check now: checking, then the wait line, then a failure that leaves the schedule byte for byte', async ($, on) => {
+  const { clock, paths, sent, store, routes, good } = await connectedEngine(on, $)
+  let release: (value: unknown) => void = () => undefined
+  routes.catalogue2 = () => new Promise(resolve => { release = resolve })
+
+  await openSettings($)
+  const ui = await mount($)
+  const pressing = ui.press({ key: 'check-now' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  // Under way: the button gives way to the line (read in the app, while the
+  // terminal's drawing waits for its press).
+  expect(await has($, SLOT_TEXT.checking, 'desktop')).toBe(true)
+  expect(await hasKey($, 'check-now', 'desktop')).toBe(undefined)
+  release(await good.catalogue2())
+  await pressing
+  await ui.unmount()
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(await has($, SLOT_TEXT.checking)).toBe(false)
+  expect(await has($, SLOT_TEXT.checkSame)).toBe(true)
+
+  // Inside the 30 seconds: nothing is sent, and the row says to wait.
+  await clock.advance(MANUAL_GAP_MS - SECOND)
+  sent.length = 0
+  await press($, 'check-now')
+  await settlePress()
+  expect(paths()).toEqual([])
+  expect(await has($, SLOT_TEXT.checkWait)).toBe(true)
+  expect(await has($, SLOT_TEXT.checkSame)).toBe(false)
+
+  // A failed press: the schedule record is untouched, the time shown is still the last good check.
+  await clock.advance(2 * SECOND)
+  routes.catalogue2 = () => new Error('offline')
+  const before = JSON.stringify(store.get('fetch'))
+  await press($, 'check-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(JSON.stringify(store.get('fetch'))).toBe(before)
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(true)
+  expect(await has($, SLOT_TEXT.checkedAt('09:00'))).toBe(true)
+  expect(await hasKey($, 'check-now')).toBeDefined()
+  // The main screen is still reachable as far as the schedule knows: no "Try now", no note.
+  await press($, 'settings-back')
+  expect(await hasKey($, 'try-now')).toBe(undefined)
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(false)
+})
+
+stage('Check now: after a failed automatic try the row shows no time; the next success brings it back and clears the old note', async ($, on) => {
+  const { clock, routes, good } = await connectedEngine(on, $)
+
+  routes.catalogue2 = () => new Error('offline')
+  await clock.advance(6 * HOUR)
+  await openSettings($)
+  expect(await has($, SLOT_TEXT.lastCheckFailed)).toBe(true)
+  expect(await has($, /^Offers checked at/)).toBe(false)
+  expect(await hasKey($, 'check-now')).toBeDefined()
+
+  await press($, 'check-now')
+  await settlePress()
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(true)
+  expect(await has($, SLOT_TEXT.lastCheckFailed)).toBe(true)
+
+  // The schedule succeeds by itself: the time is back, and the old failure note goes.
+  routes.catalogue2 = good.catalogue2
+  await clock.advance(DAY)
+  expect(await has($, /^Offers checked at \d\d:\d\d$/)).toBe(true)
+  expect(await has($, SLOT_TEXT.lastCheckFailed)).toBe(false)
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(false)
+
+  // A note goes when Settings is opened afresh, and when the panel closes.
+  await clock.advance(MINUTE)
+  await press($, 'check-now')
+  await settlePress()
+  expect(await has($, SLOT_TEXT.checkSame)).toBe(true)
+  await press($, 'settings-back')
+  await openSettings($)
+  expect(await has($, SLOT_TEXT.checkSame)).toBe(false)
+  await clock.advance(MANUAL_GAP_MS + SECOND)
+  await press($, 'check-now')
+  await settlePress()
+  expect(await has($, SLOT_TEXT.checkSame)).toBe(true)
+  await closePane($)
+  expect(await has($, SLOT_TEXT.checkSame)).toBe(false)
+})
+
+stage('Check now and Try now share one 30-second limit, in both orders, and keep their own notes', async ($, on) => {
+  const { clock, paths, sent, routes } = await connectedEngine(on, $)
+
+  routes.catalogue2 = () => new Error('offline')
+  await clock.advance(6 * HOUR)
+  sent.length = 0
+
+  // Try now first, then Check now within 30 seconds.
+  await press($, 'try-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(true)
+  await openSettings($)
+  // Settings does not show the main screen's note.
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(false)
+  await clock.advance(10 * SECOND)
+  await press($, 'check-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect(await has($, SLOT_TEXT.checkWait)).toBe(true)
+  // The main screen keeps its own note, and not the wait line from Settings.
+  await press($, 'settings-back')
+  expect(await has($, SLOT_TEXT.tryFailed)).toBe(true)
+  expect(await has($, SLOT_TEXT.checkWait)).toBe(false)
+  expect(await has($, SLOT_TEXT.tryWait)).toBe(false)
+
+  // Check now first, then Try now within 30 seconds.
+  await clock.advance(MANUAL_GAP_MS)
+  await openSettings($)
+  await press($, 'check-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2', 'GET catalogue2'])
+  await press($, 'settings-back')
+  await clock.advance(10 * SECOND)
+  await press($, 'try-now')
+  await settlePress()
+  expect(paths()).toEqual(['GET catalogue2', 'GET catalogue2'])
+  expect(await has($, SLOT_TEXT.tryWait)).toBe(true)
+  expect(await has($, SLOT_TEXT.checkWait)).toBe(false)
+})
+
+// Presses that overlap: the second waits for the first, then finds the 30 seconds taken.
+for (const order of [['try-now', 'check-now'], ['check-now', 'try-now']] as const) {
+  stage(`Check now and Try now pressed while the other's request is still under way (${order[0]} first): one request, then the wait line`, async ($, on) => {
+    const { clock, paths, sent, routes } = await connectedEngine(on, $)
+
+    routes.catalogue2 = () => new Error('offline')
+    await clock.advance(6 * HOUR)
+    let release: (value: unknown) => void = () => undefined
+    routes.catalogue2 = () => new Promise(resolve => { release = resolve })
+    sent.length = 0
+
+    // The first press, from its own screen, held at the server.
+    if (order[0] === 'check-now') {
+      await openSettings($)
+    }
+
+    const first = await mount($, 'desktop')
+    const firstPress = first.press({ key: order[0] })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await first.unmount().catch(() => undefined)
+
+    // The second press, on the other screen, while the first is still under way.
+    if (order[0] === 'check-now') {
+      await press($, 'settings-back')
+    } else {
+      await openSettings($)
+    }
+
+    const second = await mount($, 'terminal')
+    const secondPress = second.press({ key: order[1] })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    // Check now says it is checking while it waits its turn.
+    if (order[1] === 'check-now') {
+      expect(await has($, SLOT_TEXT.checking, 'desktop')).toBe(true)
+    }
+
+    // The first one fails, so the main screen keeps its "Try now" line either way.
+    release(new Error('offline'))
+    await firstPress
+    await secondPress
+    await second.unmount()
+    await settlePress()
+
+    expect(paths()).toEqual(['GET catalogue2'])
+    expect(await has($, order[1] === 'check-now' ? SLOT_TEXT.checkWait : SLOT_TEXT.tryWait)).toBe(true)
+    expect(await has($, SLOT_TEXT.checking)).toBe(false)
+  })
+}
+
+// Each state in which Settings opens but the person is not connected here.
+const CHECK_HIDDEN: Record<string, () => { options: Parameters<typeof engine>[1]; after?: (store: Map<string, unknown>) => void }> = {
+  'before Connect': () => ({ options: {} }),
+  'Connect not pressed, "Not now" saved': () => ({ options: { store: { connection: { status: 'declined', at: NINE_AM - DAY } } } }),
+  'after a disconnect': () => ({ options: { store: { connection: { status: 'withdrawn', at: NINE_AM - DAY, withdrawal: null } } } }),
+  'the texts changed since Connect': () => ({ options: { store: { connection: OLD_TEXTS } } }),
+  "a newer add-on's connection": () => ({ options: { store: { connection: NEWER_PRESS } } }),
+  // Also a connected record still saved when the panel draws after the end.
+  'after the test end': () => ({ options: { now: new Date(2026, 11, 1, 9, 0).getTime(), store: { connection: CONNECTED } }, after: store => store.set('connection', CONNECTED) }),
+}
+
+for (const [name, seed] of Object.entries(CHECK_HIDDEN)) {
+  stage(`Check now is not in Settings: ${name}`, async ($, on) => {
+    const { options, after } = seed()
+    const { sent, store } = await engine(on, options)
+
+    await start($)
+    after?.(store)
+
+    for (const surface of ['terminal', 'desktop'] as const) {
+      await openSettings($, surface)
+      expect(await hasKey($, 'settings-back', surface)).toBeDefined()
+      expect(await hasKey($, 'check-now', surface)).toBe(undefined)
+      expect(await has($, CHECK_LINE, surface)).toBe(false)
+      await press($, 'settings-back', surface)
+    }
+
+    expect(sent.filter(item => item.url.endsWith('catalogue2'))).toEqual([])
+  })
+}
+
+stage('Check now: the time is the local clock; a last check before today shows its day', async ($, on) => {
+  const { store } = await connectedEngine(on, $)
+
+  store.set('fetch', { lastAttemptAt: new Date(2026, 10, 11, 23, 7).getTime(), failures: 0, nextAt: NINE_AM + HOUR })
+  await openSettings($)
+  expect(await has($, /^Offers checked on 11 Nov at 23:07$/)).toBe(true)
+  store.set('fetch', { lastAttemptAt: new Date(2026, 10, 12, 0, 5).getTime(), failures: 0, nextAt: NINE_AM + HOUR })
+  expect(await has($, /^Offers checked at 00:05$/)).toBe(true)
+  // Nothing saved yet: no check so far.
+  store.delete('fetch')
+  expect(await has($, /^Not checked yet$/)).toBe(true)
+  // The last try failed: the time of the last good one is not known.
+  store.set('fetch', { lastAttemptAt: NINE_AM, failures: 1, nextAt: NINE_AM + HOUR })
+  expect(await has($, /^Last check didn't go through$/)).toBe(true)
+  expect(await has($, /^Offers checked/)).toBe(false)
+})
+
+stage('Check now goes from Settings the moment Pauzza is switched off there', async ($, on) => {
+  const { paths } = await connectedEngine(on, $)
+
+  await openSettings($)
+  expect(await hasKey($, 'check-now')).toBeDefined()
+  await press($, 'consent-untick')
+  expect(await hasKey($, 'settings-back')).toBeDefined()
+  expect(await hasKey($, 'check-now')).toBe(undefined)
+  expect(await has($, CHECK_LINE)).toBe(false)
+  expect(paths()).toEqual([])
 })
 
 stage('a claimed code is deleted from this computer at its use-by date', async ($, on) => {
@@ -1502,13 +2711,13 @@ stage('settings while connected: one switch, its warnings, both documents and th
   expect(await has($, new RegExp(TOKEN.slice(0, 12)))).toBe(false)
 
   await press($, 'open-privacy')
-  expect(await documentText($)).toBe('DOC PRIVACY-REHEARSAL.md')
+  expect(await documentText($)).toBe('DOC PRIVACY.md')
   await press($, 'document-back')
   await press($, 'open-terms')
-  expect(await documentText($)).toBe('DOC TERMS-REHEARSAL.md')
+  expect(await documentText($)).toBe('DOC TERMS.md')
 })
 
-stage('settings before Connect: the documents are the offline ones, and no warning mentions the server', async ($, on) => {
+stage('settings before Connect: the documents are the same ones the press accepted, and no warning mentions the server', async ($, on) => {
   const { sent } = await engine(on, { store: { connection: { status: 'declined', at: NINE_AM } } })
   await start($)
   await openSettings($)
@@ -1595,7 +2804,7 @@ stage('connecting again with a withdrawal still waiting sends the withdrawal fir
   routes.withdraw = () => reply(404, { error: 'unavailable' })
   sent.length = 0
   await press($, 'connect-press')
-  expect(paths()).toEqual(['POST withdraw', 'POST connect', 'GET catalogue'])
+  expect(paths()).toEqual(['POST withdraw', 'POST connect', 'GET catalogue2'])
   expect(sent[0].headers.authorization).toBe(`Bearer ${TOKEN}`)
   expect(readConnection(store.get('connection')).token).toBe(newToken)
 })
@@ -1633,6 +2842,7 @@ stage('claimed codes stay visible after Pauzza is switched off, until their use-
   await start($)
   expect(await has($, CONNECT_TEXT.yourCodes)).toBe(true)
   expect(await has($, /^••••••-0042$/)).toBe(true)
+  expect(await has($, CONNECT_TEXT.support)).toBe(false)
   await press($, `reveal-${CLAIM_ID}`)
   expect(await has($, /^PAUZZA-0042$/)).toBe(true)
   await walk(6 * DAY)
@@ -1655,8 +2865,8 @@ stage('"Delete saved data" while connected withdraws at once, with no undo time'
   expect(paths()).toEqual(['POST withdraw'])
 })
 
-stage('with updated Terms not yet accepted, a connected add-on fetches nothing', async ($, on) => {
-  const { paths, clock } = await engine(on, { consent: { ...GIVEN, termsVersion: 'older' }, store: { connection: CONNECTED } })
+stage('with updated Terms not yet accepted, after they apply, a connected add-on fetches nothing', async ($, on) => {
+  const { paths, clock } = await engine(on, { now: EFFECTIVE_NINE_AM, consent: { ...GIVEN, termsVersion: 'older' }, store: { connection: CONNECTED } })
 
   await start($)
   await clock.advance(DAY)
@@ -1689,7 +2899,7 @@ stage('when the test ends, the add-on withdraws, deletes what the server sent, a
   })
 
   await start($)
-  expect(await has($, CONNECT_TEXT.testCodes)).toBe(true)
+  expect(await has($, CONNECT_TEXT.offersLabel)).toBe(true)
   expect(paths()).toEqual([])
 
   // Midnight passes: the last day is over.
@@ -1706,16 +2916,370 @@ stage('when the test ends, the add-on withdraws, deletes what the server sent, a
   expect(paths()).toEqual(['POST withdraw'])
 })
 
+// ---------------------------------------------------------------- changed texts
+
+const OLD_VERSIONS = { ...VERSIONS, wordingVersion: 'stage-2-test-0.0' }
+const OLD_TEXTS = { ...CONNECTED, versions: OLD_VERSIONS }
+
+stage('changed texts: the old install is withdrawn first, nothing is fetched or claimed, and the Connect card asks again', async ($, on) => {
+  const key = await testKey(7)
+  const { paths, sent, store, clock, routes } = await engine(on, {
+    store: {
+      connection: OLD_TEXTS,
+      codes: [held()],
+      catalogue: { text: await signCatalogue(key, catalogue()), seq: 1, format: 2 },
+      // The list is due now: it must still not be fetched.
+      fetch: { lastAttemptAt: NINE_AM - 5 * HOUR, failures: 0, nextAt: NINE_AM - HOUR },
+      [LIST_FLOOR_KEY]: 1,
+    },
+  })
+
+  await start($)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(sent[0].headers.authorization).toBe(`Bearer ${TOKEN}`)
+  expect(JSON.parse(sent[0].body!)).toEqual(OLD_VERSIONS)
+
+  const record = readConnection(store.get('connection'))
+  expect(record.status).toBe('withdrawn')
+  expect(record.withdrawal).toBe(null)
+  expect(record.textsChanged).toBe(true)
+  expect(JSON.stringify(store.get('connection'))).not.toContain(TOKEN)
+  // As on a disconnect: what the server sent goes; the claimed code and the highest list number stay.
+  expect(store.get('catalogue')).toBe(undefined)
+  expect(store.get('fetch')).toBe(undefined)
+  expect(store.get(LIST_FLOOR_KEY)).toBe(1)
+  expect(readCodes(store.get('codes'), NINE_AM)).toEqual([held()])
+
+  // The Connect card again, with its one extra line; the panel as before Connect.
+  expect(await hasKey($, 'connect-press')).toBeDefined()
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(true)
+  expect(await has($, CONNECT_TEXT.what)).toBe(true)
+  expect(await has($, CONNECT_TEXT.disconnectedDone)).toBe(false)
+  expect(await has($, CONSENT_TEXT.samples)).toBe(true)
+  expect(await has($, CONNECT_TEXT.offersLabel)).toBe(false)
+  await press($, 'drawer-food')
+  expect(await hasKey($, 'claim-mock-pizza')).toBe(undefined)
+  expect(await has($, /^Test Pizza$/)).toBe(true)
+  // The code already claimed is still under Mine.
+  await press($, 'drawer-mine')
+  expect(await has($, /^••••••-0042$/)).toBe(true)
+
+  // Closing the panel: still disconnected, nothing more is sent, and the card asks again next time.
+  await closePane($)
+  await clock.advance(6 * HOUR)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(true)
+
+  // Connect again: a fresh install under the current versions, and the list comes again.
+  const newToken = `new${TOKEN.slice(3)}`
+  routes.connect = () => reply(201, { ...CONNECT_BODY, token: newToken })
+  sent.length = 0
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+  expect(JSON.parse(sent[0].body!)).toEqual({ ...VERSIONS, addonVersion: '0.21.0' })
+
+  const after = readConnection(store.get('connection'))
+  expect(isConnected(after)).toBe(true)
+  expect(after.token).toBe(newToken)
+  expect(after.versions).toEqual(VERSIONS)
+  expect(after.textsChanged).toBe(false)
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(false)
+  expect(await has($, CONNECT_TEXT.offersLabel)).toBe(true)
+})
+
+stage('changed texts: the card is the one button; its press connects, and the acceptance of the current Terms is left as it is', async ($, on) => {
+  const { paths, store, sent } = await engine(on, { store: { connection: OLD_TEXTS } })
+
+  await start($)
+  expect(paths()).toEqual(['POST withdraw'])
+  const ui = await mount($)
+  expect(await ui.findAll({ key: 'connect-press' })).toHaveLength(1)
+  expect(await ui.find({ key: 'consent-later' })).toBe(undefined)
+  // The line still reads true: the texts changed, the press is "Connect", the codes stay.
+  expect(await ui.find({ type: 'Text', text: CONNECT_TEXT.textsChanged })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: CONNECT_TEXT.what })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: CONNECT_TEXT.figures })).toBeDefined()
+  await ui.unmount()
+
+  sent.length = 0
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+  // The local acceptance already names these Terms: the server's receipt of the press records the new Connect texts.
+  expect(readConsent(store.get('consent'))).toEqual(readConsent(GIVEN))
+  expect(isConnected(readConnection(store.get('connection')))).toBe(true)
+})
+
+stage('changed texts while offline: the withdrawal waits and goes first at the next start; nothing is fetched or connected meanwhile', async ($, on) => {
+  const { paths, sent, store, clock, routes, good } = await engine(on, { store: { connection: OLD_TEXTS, codes: [held()] } })
+  routes.withdraw = () => new Error('offline')
+
+  await start($)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(readConnection(store.get('connection')).withdrawal?.token).toBe(TOKEN)
+  expect(isConnected(readConnection(store.get('connection')))).toBe(false)
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(true)
+  expect(await hasKey($, 'connect-press')).toBeDefined()
+
+  // A Connect press while the withdrawal still cannot be sent: only the withdrawal is tried.
+  sent.length = 0
+  await press($, 'connect-press')
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(await has($, CONNECT_TEXT.connectFailed)).toBe(true)
+  expect(isConnected(readConnection(store.get('connection')))).toBe(false)
+
+  // Hours of ticks: only withdrawal tries, with the old token, never the list.
+  await clock.advance(6 * HOUR)
+  expect(paths().every(path => path === 'POST withdraw')).toBe(true)
+  expect(sent.every(item => item.headers.authorization === `Bearer ${TOKEN}`)).toBe(true)
+
+  // The next start: the withdrawal goes out before anything else, and then nothing.
+  routes.withdraw = good.withdraw
+  sent.length = 0
+  await start($)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(readConnection(store.get('connection')).withdrawal).toBe(null)
+  await clock.advance(DAY)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(true)
+  expect(readCodes(store.get('codes'), NINE_AM + DAY)).toEqual([held()])
+})
+
+for (const [name, versions] of Object.entries(OLDER_TEXTS)) {
+  stage(`changed texts (${name}): one withdrawal at start, then the Connect card asks again`, async ($, on) => {
+    const { paths, sent, store, clock } = await engine(on, { store: { connection: { ...CONNECTED, versions } } })
+
+    await start($)
+    expect(paths()).toEqual(['POST withdraw'])
+    expect(sent[0].headers.authorization).toBe(`Bearer ${TOKEN}`)
+    expect(JSON.parse(sent[0].body!)).toEqual(versions ?? VERSIONS)
+    expect(readConnection(store.get('connection')).textsChanged).toBe(true)
+    expect(await has($, CONNECT_TEXT.textsChanged)).toBe(true)
+    await clock.advance(DAY)
+    expect(paths()).toEqual(['POST withdraw'])
+  })
+}
+
+stage('the changed-texts line shows only after a change of texts: not on a first Connect card, nor after a disconnect', async ($, on) => {
+  const { store, sent } = await engine(on)
+
+  await start($)
+  expect(await hasKey($, 'connect-press')).toBeDefined()
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(false)
+
+  store.set('connection', { status: 'withdrawn', at: NINE_AM - DAY, withdrawal: null })
+  expect(await hasKey($, 'connect-press')).toBeDefined()
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(false)
+  expect(sent).toEqual([])
+})
+
+stage('changed texts after the test has ended: withdrawn once, the test codes deleted, and no card', async ($, on) => {
+  const { paths, store, walk } = await engine(on, {
+    now: new Date(2026, 11, 1, 9, 0).getTime(),
+    store: { connection: OLD_TEXTS, codes: [held({ useBy: new Date(2026, 11, 20).getTime() })] },
+  })
+
+  await start($)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(store.get('codes')).toBe(undefined)
+  expect(JSON.stringify([...store.values()])).not.toContain(TOKEN)
+  expect(await hasKey($, 'connect-press')).toBe(undefined)
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(false)
+  await walk(3 * DAY)
+  expect(paths()).toEqual(['POST withdraw'])
+})
+
+stage('changed texts on an install unused for 12 months: the withdrawal is still sent, nothing is fetched, and the card asks again', async ($, on) => {
+  const old = { ...OLD_TEXTS, at: NINE_AM - 400 * DAY, lastContactAt: NINE_AM - 400 * DAY, firstSeenAt: NINE_AM - 400 * DAY }
+  const { paths, store, clock, routes, sent } = await engine(on, { store: { connection: old } })
+  // The server forgot it long ago, and answers 200 as for any withdrawal (a 404 counts as done too).
+  for (const answer of [() => reply(200, { ok: true }), () => reply(404, { error: 'unavailable' })]) {
+    routes.withdraw = answer
+    store.set('connection', old)
+    sent.length = 0
+
+    await start($)
+    await clock.advance(DAY)
+    expect(paths()).toEqual(['POST withdraw'])
+    expect(readConnection(store.get('connection')).withdrawal).toBe(null)
+    expect(JSON.stringify(store.get('connection'))).not.toContain(TOKEN)
+    expect(await hasKey($, 'connect-press')).toBeDefined()
+    expect(await has($, CONNECT_TEXT.textsChanged)).toBe(true)
+  }
+})
+
+// What a window still running this version sees when a newer Pauzza, in
+// another window, has made a Connect press under its own new texts.
+const NEWER_PRESS = { ...CONNECTED, token: `new${TOKEN.slice(3)}`, versions: { wordingVersion: 'stage-b-1.0', termsVersion: '1.0', privacyVersion: '1.0' }, addonVersion: '0.22.0' }
+
+stage('a press made by a newer Pauzza in another window: nothing is sent or saved, no Connect card, and the update line shows', async ($, on) => {
+  const { paths, store, clock, toasts } = await engine(on, { store: { connection: NEWER_PRESS } })
+  const before = JSON.stringify([...store.entries()].filter(([name]) => name !== 'saved'))
+
+  await start($)
+  // Several ticks, and redraws in between: the newer install survives them all.
+  for (let i = 0; i < 6; i += 1) {
+    await clock.advance(TICK_MS)
+    await mount($).then((ui: any) => ui.unmount())
+  }
+
+  expect(paths()).toEqual([])
+  expect(JSON.stringify([...store.entries()].filter(([name]) => name !== 'saved'))).toBe(before)
+  expect(store.get('connection')).toEqual(NEWER_PRESS)
+  expect(await hasKey($, 'connect-press')).toBe(undefined)
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(false)
+  expect(await has($, CONNECT_TEXT.what)).toBe(false)
+  expect(await has($, SLOT_TEXT.updateHint)).toBe(true)
+  // No claim from here: the samples, as before Connect.
+  expect(await has($, CONSENT_TEXT.samples)).toBe(true)
+  expect(await has($, CONNECT_TEXT.offersLabel)).toBe(false)
+  expect(toasts.filter(text => text === OFFER_POPUP)).toEqual([])
+  await clock.advance(DAY)
+  expect(paths()).toEqual([])
+  expect(store.get('connection')).toEqual(NEWER_PRESS)
+})
+
+stage('two windows, two versions: the newer window connects anew, and this older one never withdraws the new install', async ($, on) => {
+  // This window runs this version; the record is first an old press, as at a release of new texts.
+  const { paths, sent, store, clock } = await engine(on, { store: { connection: { ...CONNECTED, addonVersion: '0.21.0', versions: OLDER_TEXTS.wording } } })
+
+  await start($)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(sent[0].headers.authorization).toBe(`Bearer ${TOKEN}`)
+
+  // The newer window: the person presses Connect there, and a fresh install is saved.
+  store.set('connection', NEWER_PRESS)
+  sent.length = 0
+
+  // This window's ticks, for half an hour, and its panel: the fresh install is left alone.
+  for (let i = 0; i < 6; i += 1) {
+    await clock.advance(TICK_MS)
+    await mount($).then((ui: any) => ui.unmount())
+  }
+
+  expect(paths()).toEqual([])
+  expect(store.get('connection')).toEqual(NEWER_PRESS)
+  expect(await has($, SLOT_TEXT.updateHint)).toBe(true)
+})
+
+stage("the test end in a window left on this version: only its own test codes go; a newer connection's codes and data stay", async ($, on) => {
+  const endsSoon = new Date(2026, 10, 30, 22, 0).getTime()
+  // Saved by a newer Pauzza in another window, under its own new texts.
+  const newerData: Record<string, unknown> = {
+    connection: NEWER_PRESS,
+    catalogue: { text: 'a newer list', seq: 7, format: 3 },
+    fetch: { lastAttemptAt: endsSoon - HOUR, failures: 0, nextAt: endsSoon + DAY },
+    serverPopups: { date: '2026-11-30', shown: {}, seen: ['real-pizza-c1'], events: [], newsSeq: null, limits: [], offerDue: false },
+    manualTry: endsSoon - HOUR,
+    [LIST_FLOOR_KEY]: 7,
+  }
+  const rehearsal = held({ useBy: DECEMBER_20 })
+  const { paths, store, clock, walk } = await engine(on, { now: endsSoon, store: { ...newerData, codes: [rehearsal, OURS_CODE, NEWER_CODE] } })
+
+  await start($)
+  // Before the end: this window's own test code shows; the newer connection's code is not this window's to show.
+  expect(await has($, /^••••••-0042$/)).toBe(true)
+  expect(await has($, /0001/)).toBe(false)
+  expect(store.get('codes')).toEqual([rehearsal, OURS_CODE, NEWER_CODE])
+
+  // Midnight passes: this version's test is over.
+  await clock.advance(2 * HOUR + 6 * MINUTE)
+
+  // Ticks, redraws and days: nothing is sent, and the newer connection's things stay.
+  for (let i = 0; i < 6; i += 1) {
+    await clock.advance(TICK_MS)
+    await mount($).then((ui: any) => ui.unmount())
+  }
+
+  await walk(2 * DAY)
+  expect(paths()).toEqual([])
+  // This version's test codes, marked or not, are gone; the newer one is kept as saved.
+  expect(store.get('codes')).toEqual([NEWER_CODE])
+
+  for (const [name, value] of Object.entries(newerData)) {
+    expect(store.get(name)).toEqual(value)
+  }
+
+  // What this window shows: no codes, no Connect card, the newer-version line.
+  expect(await has($, /0001|0042|0043/)).toBe(false)
+  expect(await hasKey($, 'connect-press')).toBe(undefined)
+  expect(await has($, SLOT_TEXT.updateHint)).toBe(true)
+})
+
+stage('the test end in a single window: codes claimed under this version are deleted, marked or not, with the withdrawal', async ($, on) => {
+  const { paths, store, clock } = await engine(on, {
+    now: new Date(2026, 10, 30, 22, 0).getTime(),
+    store: {
+      connection: { ...CONNECTED, addonVersion: '0.21.0' },
+      codes: [held({ useBy: DECEMBER_20 }), OURS_CODE],
+      fetch: { lastAttemptAt: new Date(2026, 10, 30, 21, 0).getTime(), failures: 0, nextAt: new Date(2026, 11, 5).getTime() },
+    },
+  })
+
+  await start($)
+  await clock.advance(2 * HOUR + 6 * MINUTE)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(store.get('codes')).toBe(undefined)
+  expect(store.get('catalogue')).toBe(undefined)
+  // "Codes … stay here" is not said, since the test's codes were just deleted.
+  for (const surface of ['terminal', 'desktop'] as const) {
+    expect(await has($, /Codes you already claimed stay here/, surface)).toBe(false)
+  }
+})
+
+stage("Get code saves the connection it was claimed under, and leaves a newer add-on's saved codes as they are", async ($, on) => {
+  const { store, paths } = await connectedEngine(on, $, { store: { connection: { ...CONNECTED, addonVersion: '0.21.0' }, codes: [NEWER_CODE] } })
+
+  await press($, 'drawer-food')
+  expect(await press($, 'claim-mock-pizza')).toBe(true)
+  expect(paths()).toEqual(['POST claim'])
+
+  const saved = store.get('codes') as any[]
+  expect(saved).toHaveLength(2)
+  expect(saved[0].code).toBe('PAUZZA-0042')
+  expect(saved[0].claimedUnder).toEqual({ ...VERSIONS, addonVersion: '0.21.0' })
+  expect(saved[1]).toEqual(NEWER_CODE)
+})
+
+stage('a press made by a newer Pauzza: switching Pauzza off here still disconnects it', async ($, on) => {
+  const { paths, sent, store, clock } = await engine(on, { store: { connection: NEWER_PRESS } })
+
+  await start($)
+  await openSettings($)
+  expect(await has($, CONNECT_TEXT.alsoDisconnects)).toBe(true)
+  await press($, 'consent-untick')
+  await clock.advance(11 * SECOND)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(sent[0].headers.authorization).toBe(`Bearer ${NEWER_PRESS.token}`)
+  expect(JSON.parse(sent[0].body!)).toEqual(NEWER_PRESS.versions)
+  expect(readConnection(store.get('connection')).withdrawal).toBe(null)
+  expect(readConnection(store.get('connection')).textsChanged).toBe(false)
+})
+
+stage('"Delete saved data" after a change of texts also clears the reason: the card no longer says the texts changed', async ($, on) => {
+  const { paths, store } = await engine(on, { store: { connection: OLD_TEXTS } })
+
+  await start($)
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(true)
+
+  await openSettings($)
+  await press($, 'reset')
+  await press($, 'reset-confirm')
+  expect(paths()).toEqual(['POST withdraw'])
+  expect(readConnection(store.get('connection')).textsChanged).toBe(false)
+  expect(await has($, CONNECT_TEXT.textsChanged)).toBe(false)
+})
+
 stage('pop-ups follow the signed rules: none without a rule, and never more than the rule allows', async ($, on) => {
   const { routes, key, toasts, clock } = await engine(on, { store: { connection: CONNECTED } })
-  routes.catalogue = async () => reply(200, await signCatalogue(key, catalogue({ popupRules: [] })))
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ popupRules: [] })))
 
   await start($)
   await clock.advance(2 * MINUTE)
   expect(toasts).toEqual([])
 
   // A newer list with a rule and a new offer: one built-in line, once.
-  routes.catalogue = async () => reply(200, await signCatalogue(key, catalogue({ seq: 2, offers: [offer('mock-pizza'), offer('mock-cake', { brand: 'Mock Cake' })], popupRules: [{ id: 'daily', template: 'daily-offer', maxPerDay: 1 }] })))
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ seq: 2, offers: [offer('mock-pizza'), offer('mock-cake', { brand: 'Mock Cake' })], popupRules: [{ id: 'daily', template: 'daily-offer', maxPerDay: 1 }] })))
   await clock.advance(6 * HOUR)
   expect(toasts).toEqual([OFFER_POPUP])
   expect(toasts.every(isBuiltInPopup)).toBe(true)
@@ -1746,8 +3310,10 @@ stage('everything sent in a whole connected day is on the short list, and carrie
 
   for (const request of sent) {
     expect(request.url.startsWith(BASE_URL)).toBe(true)
-    expect(request.url).toMatch(/^https:\/\/pwchzyltlirhiiaxoifb\.supabase\.co\/functions\/v1\/(connect|catalogue|claim|withdraw)$/)
-    expect(Object.keys(request.headers).every(name => ['content-type', 'authorization', 'if-none-match'].includes(name))).toBe(true)
+    expect(request.url).toMatch(/^https:\/\/pwchzyltlirhiiaxoifb\.supabase\.co\/functions\/v1\/(connect|catalogue2|claim|withdraw)$/)
+    expect(Object.keys(request.headers).every(name => ['content-type', 'authorization'].includes(name))).toBe(true)
+    // Every POST says it is JSON, which the server requires (finding 5); the list request sends no header at all.
+    expect(request.headers['content-type']).toBe(request.method === 'POST' ? 'application/json' : undefined)
 
     if (request.body !== undefined) {
       expect(Object.keys(JSON.parse(request.body)).every(field => allowedFields.includes(field))).toBe(true)
@@ -1763,3 +3329,169 @@ stage('everything sent in a whole connected day is on the short list, and carrie
   expect(sent.filter(item => item.url.endsWith('/claim'))).toHaveLength(1)
   expect(sent.filter(item => item.url.endsWith('/withdraw'))).toHaveLength(1)
 })
+
+// ---------------------------------------------------------------- findings 4, 6 and 7 of the 2026-11-12 review
+
+// Every link the panel draws, on both surfaces, with every drawer opened in turn.
+async function allLinks($: any, surface: 'terminal' | 'desktop') {
+  const found: { href: string; label: string }[] = []
+
+  for (const drawer of ['drawer-mine', 'drawer-food', 'drawer-drinks']) {
+    await press($, drawer, surface)
+    const ui = await mount($, surface)
+    found.push(...(await ui.findAll({ type: 'Link' })).map((item: any) => ({ href: item.props.href, label: item.props.label })))
+    await ui.unmount()
+  }
+
+  return found
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  stage(`an offer's link (${surface}) opens exactly the signed address, labelled with its host; never Pauzza's own address`, async ($, on) => {
+    const { sent } = await connectedEngine(on, $)
+    const links = await allLinks($, surface)
+
+    expect(links).toContainEqual({ href: 'https://shop.example/juice', label: 'shop.example' })
+    expect(links.filter(link => link.href.startsWith(BASE_URL) || link.href.includes('/o/'))).toEqual([])
+    // Opening it is the person's own browser at the shop: the add-on sends nothing.
+    expect(sent).toEqual([])
+  })
+}
+
+stage('a list whose offer links to a host it does not list is refused whole, so no link shows', async ($, on) => {
+  const { routes, key, store } = await engine(on, { store: { connection: CONNECTED } })
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ allowedLinkHosts: ['other.example'] })))
+
+  await start($)
+  expect(store.get('catalogue')).toBe(undefined)
+  expect(await hasKey($, 'drawer-drinks')).toBe(undefined)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    expect(await allLinks($, surface)).toEqual([])
+  }
+})
+
+stage('the list request never sends If-None-Match, even after the server sent a tag; a 304 reply counts as no reply', async ($, on) => {
+  const { routes, sent, store, clock } = await connectedEngine(on, $)
+
+  // The first list came with a tag; nothing of it is kept.
+  expect(Object.keys(store.get('catalogue') as object).sort()).toEqual(['format', 'seq', 'text'])
+
+  routes.catalogue2 = () => reply(304, '', { etag: `"${'ab'.repeat(32)}"` })
+  await clock.advance(6 * HOUR)
+  expect(sent.length).toBeGreaterThan(0)
+  expect(sent.every(item => Object.keys(item.headers).length === 0)).toBe(true)
+  // Not an answer to anything asked: the fetch counts as failed, and the last good list stays.
+  expect((store.get('fetch') as any).failures).toBeGreaterThan(0)
+  await press($, 'drawer-food')
+  expect(await has($, /^Mock Pizza$/)).toBe(true)
+})
+
+stage('the highest list number outlasts a disconnect: after switching off and connecting again, an older signed list is refused', async ($, on) => {
+  const { routes, store, clock, key, paths, sent } = await engine(on)
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ seq: 5 })))
+
+  await start($)
+  await press($, 'connect-press')
+  expect((store.get('catalogue') as any).seq).toBe(5)
+  expect(store.get(LIST_FLOOR_KEY)).toBe(5)
+
+  // Switched off: the withdrawal goes, and with it the list. The number stays: it is the same for everyone.
+  await openSettings($)
+  await press($, 'consent-untick')
+  await clock.advance(11 * SECOND)
+  expect(paths()).toContain('POST withdraw')
+  expect(store.get('catalogue')).toBe(undefined)
+  expect(store.get(LIST_FLOOR_KEY)).toBe(5)
+
+  // Back on, and connected again. The server now hands out an older signed list.
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ seq: 4, offers: [offer('old-offer', { brand: 'Old Offer' })] })))
+  // Coming back is the one press: it accepts and connects.
+  sent.length = 0
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+  expect(store.get('catalogue')).toBe(undefined)
+  expect(await hasKey($, 'drawer-food')).toBe(undefined)
+  expect(await has($, /^Old Offer$/)).toBe(false)
+
+  // A newer one is taken, and raises the number.
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ seq: 6 })))
+  await clock.advance(40 * MINUTE)
+  expect((store.get('catalogue') as any).seq).toBe(6)
+  expect(store.get(LIST_FLOOR_KEY)).toBe(6)
+})
+
+stage('switching off and connecting again while the server still serves the same list: it is taken, and its offers show', async ($, on) => {
+  const { routes, store, clock, key, paths, sent } = await engine(on)
+  const same = await signCatalogue(key, catalogue({ seq: 5 }))
+  routes.catalogue2 = () => reply(200, same)
+
+  await start($)
+  await press($, 'connect-press')
+  expect(store.get(LIST_FLOOR_KEY)).toBe(5)
+  await openSettings($)
+  await press($, 'consent-untick')
+  await clock.advance(11 * SECOND)
+  expect(store.get('catalogue')).toBe(undefined)
+
+  // Coming back is the one press: it accepts and connects.
+  sent.length = 0
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+  // The number it already holds is not a replay: the list is the newest one there is.
+  expect((store.get('catalogue') as any).text).toBe(same)
+  expect(store.get(LIST_FLOOR_KEY)).toBe(5)
+  expect((store.get('fetch') as any).failures).toBe(0)
+  expect(await has($, /Can't reach Pauzza/)).toBe(false)
+  await press($, 'drawer-food')
+  expect(await has($, /^Mock Pizza$/)).toBe(true)
+})
+
+stage('after 12 months without contact, a new Connect takes the same list again; an older one is still refused', async ($, on) => {
+  const key = await testKey(7)
+  const same = await signCatalogue(key, catalogue({ seq: 5 }))
+  const old = { ...CONNECTED, at: NINE_AM - 400 * DAY, lastContactAt: NINE_AM - 400 * DAY, firstSeenAt: NINE_AM - 400 * DAY }
+  const { routes, store, clock, paths, sent } = await engine(on, { store: { connection: old, catalogue: { text: same, seq: 5, format: 2 }, [LIST_FLOOR_KEY]: 5 } })
+  routes.catalogue2 = async () => reply(200, await signCatalogue(key, catalogue({ seq: 4, offers: [offer('old-offer', { brand: 'Old Offer' })] })))
+
+  await start($)
+  await clock.advance(MINUTE)
+  // Forgotten: the list goes, the number stays.
+  expect(readConnection(store.get('connection')).status).toBe('none')
+  expect(store.get('catalogue')).toBe(undefined)
+  expect(store.get(LIST_FLOOR_KEY)).toBe(5)
+
+  // Connect again while the server hands out an older list: refused.
+  expect(await press($, 'connect-press')).toBe(true)
+  expect(paths()).toEqual(['POST connect', 'GET catalogue2'])
+  expect(store.get('catalogue')).toBe(undefined)
+  expect(await has($, /^Old Offer$/)).toBe(false)
+
+  // The same list as before: taken, and its offers show.
+  routes.catalogue2 = () => reply(200, same)
+  sent.length = 0
+  await clock.advance(40 * MINUTE)
+  expect(paths()).toEqual(['GET catalogue2'])
+  expect((store.get('catalogue') as any).text).toBe(same)
+  await press($, 'drawer-food')
+  expect(await has($, /^Mock Pizza$/)).toBe(true)
+})
+
+stage('"Delete saved data" removes the highest list number too', async ($, on) => {
+  const { store } = await connectedEngine(on, $)
+
+  expect(store.get(LIST_FLOOR_KEY)).toBe(1)
+  await openSettings($)
+  await press($, 'reset')
+  await press($, 'reset-confirm')
+  expect(store.get(LIST_FLOOR_KEY)).toBe(undefined)
+})
+
+for (const [name, value] of Object.entries({ text: '9', fraction: 4.5, negative: -3, huge: 2 ** 60, object: { seq: 9 } })) {
+  stage(`a saved list number that is not a whole number (${name}) is read as none`, async ($, on) => {
+    const { store } = await connectedEngine(on, $, { store: { [LIST_FLOOR_KEY]: value } })
+
+    expect((store.get('catalogue') as any).seq).toBe(1)
+    expect(store.get(LIST_FLOOR_KEY)).toBe(1)
+  })
+}

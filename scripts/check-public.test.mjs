@@ -148,7 +148,7 @@ const setRelease = (dir, change) => edit(dir, 'release.json', text => JSON.strin
 
 for (const [label, change, pattern] of [
   ['an unreadable release.json', dir => writeFileSync(join(dir, 'release.json'), '{ not json'), /release\.json: does not parse/],
-  ['a missing end date', dir => setRelease(dir, data => ({ ...data, testEndDate: '' })), /testEndDate is not a real date/],
+  ['a placeholder end date', dir => setRelease(dir, data => ({ ...data, testEndDate: '[TEST END DATE]' })), /testEndDate is not a real date/],
   ['an impossible end date', dir => setRelease(dir, data => ({ ...data, testEndDate: '2026-02-30' })), /testEndDate is not a real date/],
   ['no pinned key', dir => setRelease(dir, data => ({ ...data, catalogueKeys: {} })), /no pinned key/],
   ['an empty pinned key', dir => setRelease(dir, data => ({ ...data, catalogueKeys: { 'owner-x': '' } })), /owner-x is not a base64 value of 32 bytes/],
@@ -163,6 +163,24 @@ for (const [label, change, pattern] of [
 ]) {
   test(`Release file: ${label} is refused`, () => {
     expectFailure(change, pattern)
+  })
+}
+
+for (const [label, change] of [
+  ['left out', data => { const { testEndDate: _end, ...rest } = data; return rest }],
+  ['empty', data => ({ ...data, testEndDate: '' })],
+]) {
+  test(`Release file: an end date ${label} means no end date and passes`, () => {
+    const dir = copy()
+
+    try {
+      setRelease(dir, change)
+      const result = guard(dir)
+
+      assert.equal(result.status, 0, result.stderr)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 }
 
@@ -223,7 +241,7 @@ test('Licence: all rights must stay reserved', () => {
 })
 
 test('Files: a file the add-on reads must ship', () => {
-  expectFailure(dir => rmSync(join(dir, 'TERMS-REHEARSAL.md')), /TERMS-REHEARSAL\.md: read by the add-on but missing/)
+  expectFailure(dir => rmSync(join(dir, 'PRIVACY.md')), /PRIVACY\.md: read by the add-on but missing/)
 })
 
 test('Licence: the pictures and name must stay excluded', () => {
@@ -235,7 +253,7 @@ test('Release: open values are refused', () => {
   expectFailure(dir => appendFileSync(join(dir, 'TERMS.md'), '\nOperator: [ENTITY NAME]\n'), /TERMS\.md: \d+ open values/, '--release')
 })
 
-for (const file of ['TERMS-REHEARSAL.md', 'PRIVACY-REHEARSAL.md']) {
+for (const file of ['TERMS.ka.md', 'PRIVACY.ka.md']) {
   test(`Release: open values in ${file} are refused`, () => {
     expectFailure(dir => appendFileSync(join(dir, file), '\nEnds on [DATE]\n'), new RegExp(`${file.replace('.', '\\.')}: \\d+ open values`), '--release')
   })
@@ -253,7 +271,7 @@ function releaseReady(email, commits = 1) {
   const dir = copy()
   const run = (...args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
 
-  for (const file of ['TERMS.md', 'TERMS.ka.md', 'PRIVACY.md', 'PRIVACY.ka.md', 'TERMS-REHEARSAL.md', 'PRIVACY-REHEARSAL.md']) writeFileSync(join(dir, file), 'Final text. [Link](PRIVACY.md)\n')
+  for (const file of ['TERMS.md', 'TERMS.ka.md', 'PRIVACY.md', 'PRIVACY.ka.md']) writeFileSync(join(dir, file), 'Final text. [Link](PRIVACY.md)\n')
   setRelease(dir, data => ({ ...data, testEndDate: daysAhead(30) }))
   edit(dir, 'README.md', text => text.replaceAll('[OWNER]', 'owner'))
   edit(dir, 'RELEASING.md', text => text.replaceAll('[OWNER]', 'owner'))
@@ -282,14 +300,13 @@ test('F5: a fresh one-commit repository with a no-reply address passes', () => {
   }
 })
 
-test('F5: more than one commit is refused', () => {
+test('F5: a later release, one more commit on top, passes', () => {
   const dir = releaseReady(NO_REPLY, 2)
 
   try {
     const result = guard(dir, '--release')
 
-    assert.equal(result.status, 1)
-    assert.match(result.stderr, /one commit, found 2/)
+    assert.equal(result.status, 0, result.stderr)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -306,4 +323,8 @@ test('F5: a personal address is refused', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('Release: marked rehearsal wording left in the hooks is refused', () => {
+  expectFailure(dir => edit(dir, 'hooks/connect-text.ts', text => text.replace("offersLabel: 'Partner offers',", "offersLabel: 'Test codes', // REHEARSAL-WORDING")), /release gate: Not ready to release/, '--release')
 })
